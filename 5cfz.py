@@ -26,15 +26,18 @@ _missing = [k for k, v in {
     "API_PASSPHRASE": API_PASSPHRASE, "WALLET_ADDRESS": WALLET_ADDRESS
 }.items() if not v]
 if _missing:
-    raise EnvironmentError(f"[ERROR] 环境变量未设��: {', '.join(_missing)}")
+    raise EnvironmentError(f"[ERROR] 环境变量未设置: {', '.join(_missing)}")
 
 # ── 策略参数 ──────────────────────────────────────────
-ENTRY_PRICE_MAX = 0.05    # 买入价格上限 ≤ 5¢
-BTC_DIFF_MAX    = 25.0    # chainlink 价差上限 < 25U
-BUY_SIZE        = 5       # 每次买入股数
+PRICE_LEVELS    = [0.01, 0.02, 0.03, 0.04, 0.05]  # 挂单价位
+BUY_SIZE        = 5        # 每个价位每个方向买入股数
 MARKET_PERIOD   = 300
-POLL_INTERVAL   = 1
+POLL_INTERVAL   = 2
 RTDS_WS_URL     = "wss://ws-live-data.polymarket.com"
+
+# BTC差价过滤（暂时不启用，ENABLE_BTC_FILTER=False）
+ENABLE_BTC_FILTER = False
+BTC_DIFF_MAX      = 25.0
 
 CLOB_API     = "https://clob.polymarket.com"
 GAMMA_API    = "https://gamma-api.polymarket.com"
@@ -47,8 +50,8 @@ CTF_ABI  = [{"inputs":[{"name":"collateralToken","type":"address"},{"name":"pare
 USDC_ABI = [{"inputs":[{"name":"account","type":"address"}],"name":"balanceOf","outputs":[{"name":"","type":"uint256"}],"stateMutability":"view","type":"function"}]
 SAFE_ABI = [
     {"inputs":[],"name":"nonce","outputs":[{"type":"uint256"}],"stateMutability":"view","type":"function"},
+    {"inputs":[{"name":"to","type":"address"},{"name":"value","type":"uint256"},{"name":"data","type":"bytes"},{"name":"operation","type":"uint8"},{"name":"safeTxGas","type":"uint256"},{"name":"baseGas","type":"uint256"},{"name":"gasPrice","type":"uint256"},{"name":"gasToken","type":"address"},{"name":"refundReceiver","type":"address"},{"name":"_nonce","type":"uint256"}],"name":"getTransactionHash","outputs":[{"type":"bytes32"}],"stateMutability":"view","type":"function"},
     {"inputs":[{"name":"to","type":"address"},{"name":"value","type":"uint256"},{"name":"data","type":"bytes"},{"name":"operation","type":"uint8"},{"name":"safeTxGas","type":"uint256"},{"name":"baseGas","type":"uint256"},{"name":"gasPrice","type":"uint256"},{"name":"gasToken","type":"address"},{"name":"refundReceiver","type":"address"},{"name":"signatures","type":"bytes"}],"name":"execTransaction","outputs":[{"type":"bool"}],"stateMutability":"payable","type":"function"},
-    {"inputs":[{"name":"to","type":"address"},{"name":"value","type":"uint256"},{"name":"data","type":"bytes"},{"name":"operation","type":"uint8"},{"name":"safeTxGas","type":"uint256"},{"name":"baseGas","type":"uint256"},{"name":"gasPrice","type":"uint256"},{"name":"gasToken","type":"address"},{"name":"refundReceiver","type":"address"},{"name":"_nonce","type":"uint256"}],"name":"getTransactionHash","outputs":[{"type":"bytes32"}],"stateMutability":"view","type":"function"}
 ]
 
 manual_order_queue = []
@@ -67,54 +70,17 @@ def getch():
 
 def keyboard_listener():
     global input_mode
-    print("[KEY] u=买UP  d=买DOWN  a=全部卖出  q=退出")
+    print("[KEY] a=全部卖出  q=退出")
     while True:
         try:
             key = getch()
-
-            if key in ('u', 'U'):
-                input_mode = True
-                try:
-                    sys.stdout.write("\n[手动] 买UP，输入股数: ")
-                    sys.stdout.flush()
-                    size_str = input("")
-                    size     = float(size_str.strip())
-                    with manual_lock:
-                        manual_order_queue.append({"action": "BUY", "direction": "UP", "size": size})
-                    print(f"[OK] 已加入队列: 买UP {size}股")
-                except ValueError:
-                    print("[警告] 输入无效")
-                except Exception as e:
-                    print(f"[警告] 输入错误: {e}")
-                finally:
-                    input_mode = False
-
-            elif key in ('d', 'D'):
-                input_mode = True
-                try:
-                    sys.stdout.write("\n[手动] 买DOWN，输入股数: ")
-                    sys.stdout.flush()
-                    size_str = input("")
-                    size     = float(size_str.strip())
-                    with manual_lock:
-                        manual_order_queue.append({"action": "BUY", "direction": "DOWN", "size": size})
-                    print(f"[OK] 已加入队列: 买DOWN {size}股")
-                except ValueError:
-                    print("[警告] 输入无效")
-                except Exception as e:
-                    print(f"[警告] 输入错误: {e}")
-                finally:
-                    input_mode = False
-
-            elif key in ('a', 'A'):
+            if key in ('a', 'A'):
                 with manual_lock:
                     manual_order_queue.append({"action": "SELL_ALL"})
                 print("\n[手动] 一键全部卖出已加入队列")
-
             elif key in ('q', 'Q'):
                 print("\n[退出] 用户按q退出")
                 os._exit(0)
-
         except Exception:
             time.sleep(0.1)
 
@@ -242,7 +208,7 @@ def print_stats(stats):
     total    = stats["wins"] + stats["losses"]
     win_rate = (stats["wins"] / total * 100) if total > 0 else 0
     print(f"\n{'='*55}")
-    print(f"  BTC 5M 5¢反转策略")
+    print(f"  BTC 5M 多档位反转策略 (1c~5c)")
     print(f"  总轮数: {stats['rounds']}  跳过: {stats.get('skips', 0)}")
     print(f"  胜/负: {stats['wins']}W {stats['losses']}L  胜率: {win_rate:.1f}%")
     print(f"  累计盈亏: ${stats['total_pnl']:.2f}")
@@ -263,24 +229,20 @@ def cancel_all_open_orders():
     except:
         pass
 
-def place_order_by_size(token_id, size, price, label=""):
+def place_order(token_id, size, price, label=""):
     from py_clob_client.clob_types import OrderArgs, OrderType
     from py_clob_client.order_builder.constants import BUY
     amount_usd = round(size * price, 4)
-    balance    = get_current_balance()
-    if balance is not None and amount_usd > balance:
-        print(f"[警告] 余额不足! 需${amount_usd:.4f} 当前${balance:.2f}")
-        return None
     try:
         client   = get_client()
         order    = OrderArgs(token_id=token_id, price=price, size=size, side=BUY)
         signed   = client.create_order(order)
         resp     = client.post_order(signed, OrderType.GTC)
         order_id = resp.get("orderID", "N/A") if isinstance(resp, dict) else "N/A"
-        print(f"[买入] {label}: {size}股 @ {price:.3f} = ${amount_usd:.4f} | ID:{order_id}")
+        print(f"  [挂单] {label}: {size}股 @ {price:.2f} = ${amount_usd:.4f} | ID:{order_id}")
         return resp
     except Exception as e:
-        print(f"[ERROR] 下单失败: {e}")
+        print(f"  [ERROR] 挂单失败 {label}: {e}")
         return None
 
 def sell_order_by_size(token_id, size, price, label=""):
@@ -293,7 +255,7 @@ def sell_order_by_size(token_id, size, price, label=""):
         real_bal  = ctf.functions.balanceOf(Web3.to_checksum_address(WALLET_ADDRESS), int(token_id)).call()
         real_size = real_bal / 1e6
         if real_size <= 0:
-            print(f"[警告] 链上余额为0，无法卖出")
+            print(f"  [警告] 链上余额为0，无法卖出 {label}")
             return None
         actual_size  = round(min(size, real_size) * 0.95, 3)
         actual_price = min(price, 0.99)
@@ -303,10 +265,10 @@ def sell_order_by_size(token_id, size, price, label=""):
         resp     = client.post_order(signed, OrderType.GTC)
         order_id = resp.get("orderID", "N/A") if isinstance(resp, dict) else "N/A"
         amount   = round(actual_size * actual_price, 4)
-        print(f"[卖出] {label}: {actual_size}股 @ {actual_price:.3f} = ${amount:.4f} | ID:{order_id}")
+        print(f"  [卖出] {label}: {actual_size}股 @ {actual_price:.3f} = ${amount:.4f} | ID:{order_id}")
         return resp
     except Exception as e:
-        print(f"[ERROR] 卖出失败: {e}")
+        print(f"  [ERROR] 卖出失败 {label}: {e}")
         return None
 
 def redeem_thread(condition_id):
@@ -408,102 +370,87 @@ def run_one_cycle(market):
     condition_id = market["market_id"]
 
     print(f"\n{'='*55}")
-    print(f"[新周期] {datetime.now().strftime('%H:%M:%S')} | 买入条件: 价格≤{ENTRY_PRICE_MAX} 差价<{BTC_DIFF_MAX}U 买{BUY_SIZE}股")
+    print(f"[新周期] {datetime.now().strftime('%H:%M:%S')} | 挂单价位: 1c 2c 3c 4c 5c | 每位各{BUY_SIZE}股")
     print(f"{'='*55}")
 
     price_feed.record_start_price()
 
-    placed      = False
-    entry_dir   = None
-    entry_price = None
-    entry_size  = 0.0
-    total_cost  = 0.0
+    # BTC差价检查（暂时不启用）
+    if ENABLE_BTC_FILTER:
+        btc_now, btc_start = price_feed.get_prices()
+        diff_val = abs(btc_now - btc_start) if btc_now and btc_start else 0
+        if diff_val >= BTC_DIFF_MAX:
+            print(f"[跳过] BTC差价 ${diff_val:.1f} ≥ ${BTC_DIFF_MAX}，本局跳过")
+            price_feed.reset_start_price()
+            return "skip", condition_id, 0, 0
 
+    # 挂单记录: {price: {up: order_resp, down: order_resp}}
+    orders_placed = []  # list of {dir, price, token, size, resp}
+    total_cost    = 0.0
+
+    up_p, dn_p = get_market_price(up_token)
+    if up_p is None:
+        print("[ERROR] 无法获取市场价格，本局跳过")
+        price_feed.reset_start_price()
+        return "skip", condition_id, 0, 0
+
+    btc_now, btc_start = price_feed.get_prices()
+    diff_val = (btc_now - btc_start) if btc_now and btc_start else 0
+    diff_str = f"+${diff_val:.1f}" if diff_val >= 0 else f"-${abs(diff_val):.1f}"
+    print(f"  当前 UP:{up_p:.3f} DOWN:{dn_p:.3f} | BTC差价:{diff_str}")
+
+    # 对每个价位，UP和DOWN都挂单
+    for lv in PRICE_LEVELS:
+        # UP方向
+        resp_up = place_order(up_token, BUY_SIZE, lv, f"UP@{int(lv*100)}c")
+        if resp_up:
+            orders_placed.append({"dir": "UP", "price": lv, "token": up_token, "size": BUY_SIZE})
+            total_cost = round(total_cost + BUY_SIZE * lv, 4)
+        time.sleep(0.3)
+
+        # DOWN方向
+        resp_dn = place_order(down_token, BUY_SIZE, lv, f"DOWN@{int(lv*100)}c")
+        if resp_dn:
+            orders_placed.append({"dir": "DOWN", "price": lv, "token": down_token, "size": BUY_SIZE})
+            total_cost = round(total_cost + BUY_SIZE * lv, 4)
+        time.sleep(0.3)
+
+    print(f"\n  [挂单完成] 共{len(orders_placed)}个订单 | 总投入(若全成交): ${total_cost:.4f}")
+    print(f"  等待结算中...")
+
+    # 等待周期结束
     while True:
         now       = time.time()
         remaining = int(end_ts - now)
 
-        if now >= end_ts - 1:
-            up_p, dn_p = get_market_price(up_token)
-            if up_p:
-                print(f"剩余{remaining:>4}秒 | UP:{up_p:.3f} DOWN:{dn_p:.3f} | 最终价格")
-            break
-
         if now >= end_ts - 5:
             cancel_all_open_orders()
 
-        up_p, dn_p = get_market_price(up_token)
-        if up_p is None:
-            time.sleep(POLL_INTERVAL)
-            continue
+        if now >= end_ts - 1:
+            up_p, dn_p = get_market_price(up_token)
+            if up_p:
+                print(f"  剩余{remaining:>4}秒 | UP:{up_p:.3f} DOWN:{dn_p:.3f} | 最终价格")
+            break
 
-        btc_now, btc_start = price_feed.get_prices()
-        diff_val = (btc_now - btc_start) if btc_now and btc_start else 0
-        diff_str = f"+${diff_val:.1f}" if diff_val >= 0 else f"-${abs(diff_val):.1f}"
-        btc_diff = abs(diff_val)
-
-        if not input_mode:
-            status = f"入场:{entry_dir} {entry_size}股 ${total_cost:.4f}" if placed else "未入场"
-            diff_color = "\033[1;32m" if btc_diff < BTC_DIFF_MAX else "\033[0;37m"
-            print(f"剩余{remaining:>4}秒 | UP:{up_p:.3f} DOWN:{dn_p:.3f} | 差价:{diff_color}{diff_str}\033[0m | {status}")
-
-        # ── 手动操作 ──────────────────────────────────
+        # 手动卖出
         with manual_lock:
             if manual_order_queue:
                 order_req = manual_order_queue.pop(0)
-                action    = order_req.get("action")
+                if order_req.get("action") == "SELL_ALL":
+                    print("[手动] 全部卖出...")
+                    up_p2, dn_p2 = get_market_price(up_token)
+                    if up_p2:
+                        for o in orders_placed:
+                            sp = up_p2 if o["dir"] == "UP" else dn_p2
+                            sell_order_by_size(o["token"], o["size"], sp, f"手动卖{o['dir']}@{int(o['price']*100)}c")
 
-                if action == "BUY":
-                    m_dir   = order_req["direction"]
-                    m_size  = order_req["size"]
-                    m_token = up_token if m_dir == "UP" else down_token
-                    m_price = up_p if m_dir == "UP" else dn_p
-                    print(f"[手动] 买{m_dir} {m_size}股 @ {m_price:.3f}")
-                    resp = place_order_by_size(m_token, m_size, m_price, f"手动{m_dir}")
-                    if resp:
-                        placed      = True
-                        entry_dir   = m_dir
-                        entry_price = m_price
-                        entry_size  = round(entry_size + m_size, 2)
-                        total_cost  = round(total_cost + m_size * m_price, 4)
-
-                elif action == "SELL_ALL":
-                    print("[手动] 一键全部卖出...")
-                    if entry_size > 0 and entry_dir:
-                        m_token = up_token if entry_dir == "UP" else down_token
-                        m_price = up_p if entry_dir == "UP" else dn_p
-                        sell_order_by_size(m_token, entry_size, m_price, f"全部卖{entry_dir}")
-                        entry_size  = 0.0
-                        total_cost  = 0.0
-                        placed      = False
-                        entry_dir   = None
-                    else:
-                        print("[警告] 无持仓记录")
-
-        # ── 自动买入：价格≤5¢ 且 差价<25U ──────────────
-        if not placed:
-            buy_dir = None
-            if up_p <= ENTRY_PRICE_MAX:
-                buy_dir = "UP"
-            elif dn_p <= ENTRY_PRICE_MAX:
-                buy_dir = "DOWN"
-
-            if buy_dir:
-                buy_price = up_p if buy_dir == "UP" else dn_p
-                cost      = round(BUY_SIZE * buy_price, 4)
-                if btc_diff < BTC_DIFF_MAX:
-                    buy_token = up_token if buy_dir == "UP" else down_token
-                    print(f"\033[1;36m  [信号] {buy_dir} 价格:{buy_price:.3f} 差价:{diff_str} -> 买{BUY_SIZE}股 约${cost:.4f}\033[0m")
-                    resp = place_order_by_size(buy_token, BUY_SIZE, buy_price, f"5¢反转{buy_dir}")
-                    if resp:
-                        placed      = True
-                        entry_dir   = buy_dir
-                        entry_price = buy_price
-                        entry_size  = BUY_SIZE
-                        total_cost  = cost
-                else:
-                    if not input_mode:
-                        print(f"\033[0;33m  [等待] {buy_dir}={buy_price:.3f} 满足价格但差价{diff_str}≥${BTC_DIFF_MAX}，等待差价缩小\033[0m")
+        if not input_mode:
+            up_p, dn_p = get_market_price(up_token)
+            if up_p:
+                btc_now, btc_start = price_feed.get_prices()
+                diff_val = (btc_now - btc_start) if btc_now and btc_start else 0
+                diff_str = f"+${diff_val:.1f}" if diff_val >= 0 else f"-${abs(diff_val):.1f}"
+                print(f"  剩余{remaining:>4}秒 | UP:{up_p:.3f} DOWN:{dn_p:.3f} | 差价:{diff_str}")
 
         time.sleep(POLL_INTERVAL)
 
@@ -513,39 +460,45 @@ def run_one_cycle(market):
         up_p, dn_p = 0.5, 0.5
 
     final_winner = "UP" if up_p > dn_p else "DOWN"
-    print(f"\n[结算] {final_winner}赢 | 投入:${total_cost:.4f}")
+    print(f"\n[结算] {final_winner}赢")
 
-    if not placed:
-        print("[结算] 本局无信号，未入场")
-        price_feed.reset_start_price()
-        return "skip", condition_id, 0, 0
+    # 计算盈亏
+    # 赢的方向：每个价位 net = size*(1.0 - price)
+    # 输的方向：每个价位 net = -size*price
+    total_net = 0.0
+    win_count = 0
+    lose_count = 0
+    for o in orders_placed:
+        if o["dir"] == final_winner:
+            net = round(o["size"] * (1.0 - o["price"]), 4)
+            total_net = round(total_net + net, 4)
+            win_count += 1
+            print(f"  WIN  {o['dir']}@{int(o['price']*100)}c: +${net:.4f}")
+        else:
+            net = -round(o["size"] * o["price"], 4)
+            total_net = round(total_net + net, 4)
+            lose_count += 1
+            print(f"  LOSE {o['dir']}@{int(o['price']*100)}c: ${net:.4f}")
 
-    if entry_dir == final_winner:
-        # 赢了：5股 @ 入场价，结算拿回5股*1.0
-        net = round(entry_size * (1.0 - entry_price), 4)
-        print(f"[结算] WIN  {entry_dir} {entry_size}股 @ {entry_price:.3f} -> +${net:.4f} (约{round(net/total_cost, 1)}x)")
-        result = "win"
-    else:
-        net = -total_cost
-        print(f"[结算] LOSE {entry_dir} {entry_size}股 @ {entry_price:.3f} -> -${total_cost:.4f}")
-        result = "loss"
+    print(f"[结算] 净盈亏: ${total_net:+.4f} | 赢:{win_count} 输:{lose_count}")
 
-    print(f"[结算] 净盈亏: ${net:+.4f}")
+    result = "win" if total_net >= 0 else "loss"
 
     threading.Thread(target=redeem_thread, args=(condition_id,), daemon=True).start()
     price_feed.reset_start_price()
 
-    return result, condition_id, total_cost, net
+    return result, condition_id, total_cost, total_net
 
 def main():
     atexit.register(lambda: os.system("stty sane"))
     stats = load_stats()
 
     print("=" * 55)
-    print("  BTC 5M 5¢反转策略")
-    print(f"  买入条件: 价格 ≤ {ENTRY_PRICE_MAX} 且 差价 < {BTC_DIFF_MAX}U")
-    print(f"  每次买入: {BUY_SIZE} 股")
-    print(f"  [KEY] u=买UP  d=买DOWN  a=全部卖出  q=退出")
+    print("  BTC 5M 多档位反转策略 (1c~5c)")
+    print(f"  挂单价位: {[f'{int(p*100)}c' for p in PRICE_LEVELS]}")
+    print(f"  每位各买: {BUY_SIZE}股 (UP+DOWN)")
+    print(f"  BTC差价过滤: {'开启' if ENABLE_BTC_FILTER else '关闭'}")
+    print(f"  [KEY] a=全部卖出  q=退出")
     print("=" * 55 + "\n")
 
     price_feed.start()
@@ -573,7 +526,6 @@ def main():
             last_market_id = market["market_id"]
 
             cycle_result, condition_id, spent, net = run_one_cycle(market)
-            save_stats(stats)
 
             if cycle_result == "skip":
                 stats["skips"] = stats.get("skips", 0) + 1
@@ -591,7 +543,7 @@ def main():
             stats["total_pnl"] = total_pnl
             stats["history"].append({
                 "time":   datetime.now().strftime("%Y-%m-%d %H:%M"),
-                "dir":    condition_id,
+                "market": condition_id,
                 "cost":   spent,
                 "net":    net,
                 "result": cycle_result,
@@ -612,4 +564,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
