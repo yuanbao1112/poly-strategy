@@ -32,7 +32,7 @@ BASE_BET       = 1.1
 SIGNAL_SECS    = 5
 ENTRY_MAX      = 0.65
 ENTRY_WINDOW   = 300
-PRICE_DIFF_MIN = 0.1
+PRICE_DIFF_MIN = 8.0
 MARKET_PERIOD  = 300
 POLL_INTERVAL  = 1
 RTDS_WS_URL    = "wss://ws-live-data.polymarket.com"
@@ -56,8 +56,8 @@ SAFE_ABI = [
 manual_order_queue = []
 manual_lock        = threading.Lock()
 input_mode         = False
-signal_source      = "A"   # A=庄家信号  B=跨周期马丁
-MARTIN_SEQ         = [5, 15, 45, 135]  # 跨周期马丁序列
+signal_source      = "A"   # A=庄家信号  B=跨周期马丁  C=局内马丁
+MARTIN_SEQ         = [5, 15, 45, 135]  # 马丁序列
 
 def getch():
     fd  = sys.stdin.fileno()
@@ -133,8 +133,15 @@ def keyboard_listener():
                 print("\n[手动] 一键全部卖出已加入队列")
 
             elif key in ('m', 'M'):
-                signal_source = "B" if signal_source == "A" else "A"
-                label = "庄家信号" if signal_source == "A" else "跨周期马丁"
+                if signal_source == "A":
+                    signal_source = "B"
+                    label = "跨周期马丁"
+                elif signal_source == "B":
+                    signal_source = "C"
+                    label = "局内马丁"
+                else:
+                    signal_source = "A"
+                    label = "庄家信号"
                 print(f"\n[切换] 信号源: {signal_source} ({label})")
 
             elif key in ('q', 'Q'):
@@ -281,7 +288,7 @@ def print_stats(stats, state):
     last_res    = state.get("last_result", None)
     last_bet    = state.get("last_bet", BASE_BET)
     martin_step = state.get("martin_step", 0)
-    sig_label   = "庄家信号" if signal_source == "A" else "跨周期马丁"
+    sig_label   = {"A": "庄家信号", "B": "跨周期马丁", "C": "局内马丁"}.get(signal_source, signal_source)
     print(f"\n{'='*55}")
     print(f"  BTC 5M 策略 (ab) | 信号源: {signal_source} {sig_label}")
     print(f"  总轮数: {stats['rounds']}  跳过: {stats.get('skips', 0)}")
@@ -308,6 +315,7 @@ def cancel_all_open_orders():
 def place_order_by_size(token_id, size, price, label=""):
     from py_clob_client.clob_types import OrderArgs, OrderType
     from py_clob_client.order_builder.constants import BUY
+    price      = round(round(price / 0.01) * 0.01, 2)
     amount_usd = round(size * price, 2)
     balance    = get_current_balance()
     if balance is not None and amount_usd > balance:
@@ -328,6 +336,7 @@ def place_order_by_size(token_id, size, price, label=""):
 def place_order(token_id, amount_usd, price, label=""):
     from py_clob_client.clob_types import OrderArgs, OrderType
     from py_clob_client.order_builder.constants import BUY
+    price   = round(round(price / 0.01) * 0.01, 2)
     balance = get_current_balance()
     if balance is not None and amount_usd > balance:
         print(f"[警告] 余额不足! 需${amount_usd:.2f} 当前${balance:.2f}")
@@ -358,7 +367,7 @@ def sell_order_by_size(token_id, size, price, label=""):
             print(f"[警告] 链上余额为0，无法卖出")
             return None
         actual_size  = round(min(size, real_size) * 0.95, 3)
-        actual_price = min(price, 0.99)
+        actual_price = round(round(min(price, 0.99) / 0.01) * 0.01, 2)
         client   = get_client()
         order    = OrderArgs(token_id=token_id, price=actual_price, size=actual_size, side=SELL)
         signed   = client.create_order(order)
@@ -472,7 +481,7 @@ def run_one_cycle(market, state):
     bet_amount        = MARTIN_SEQ[min(martin_step_cross, len(MARTIN_SEQ) - 1)]
 
     this_bet  = BASE_BET
-    sig_label = "庄家信号" if signal_source == "A" else "跨周期马丁"
+    sig_label = {"A": "庄家信号", "B": "跨周期马丁", "C": "局内马丁"}.get(signal_source, signal_source)
 
     print(f"\n{'='*55}")
     print(f"[新周期] {datetime.now().strftime('%H:%M:%S')} | 信号源:{sig_label} | 马丁级别:{martin_step_cross+1} 下注:${bet_amount}")
@@ -485,6 +494,9 @@ def run_one_cycle(market, state):
     entry_price = None
     entry_size  = 0.0
     total_spent = 0.0
+
+    c_martin_step = 0
+    c_last_dir    = None
 
     signal_down_count = 0
     signal_up_count   = 0
@@ -632,6 +644,31 @@ def run_one_cycle(market, state):
                     entry_size  = round(bet_amount / buy_price, 2)
                     total_spent = round(bet_amount, 2)
 
+        # ── 局内马丁 (C模式，同局内可多次反转下单) ─────────
+        if signal_source == "C":
+            cur_strong = None
+            if up_p > 0.65 and btc_diff > 66:
+                cur_strong = "UP"
+            elif dn_p > 0.65 and btc_diff > 66:
+                cur_strong = "DOWN"
+
+            if cur_strong and (c_last_dir is None or cur_strong != c_last_dir):
+                if c_martin_step < len(MARTIN_SEQ):
+                    c_bet     = MARTIN_SEQ[c_martin_step]
+                    buy_token = up_token if cur_strong == "UP" else down_token
+                    buy_price = up_p    if cur_strong == "UP" else dn_p
+                    print(f"  [局内马丁] 触发: {cur_strong} 价差:{diff_str} 级别:{c_martin_step+1} 下注:${c_bet}")
+                    resp = place_order(buy_token, c_bet, buy_price, f"局内马丁{cur_strong}")
+                    if resp:
+                        if c_last_dir is None:
+                            entry_price = buy_price
+                        entry_dir   = cur_strong
+                        entry_size  = round(entry_size + c_bet / buy_price, 2)
+                        total_spent = round(total_spent + c_bet, 2)
+                        placed      = True
+                        c_last_dir  = cur_strong
+                        c_martin_step += 1
+
         time.sleep(POLL_INTERVAL)
 
     # ── 结算 ──────────────────────────────────────────────
@@ -679,7 +716,7 @@ def main():
 
     print("=" * 55)
     print("  BTC 5M 策略 (ab)")
-    print(f"  信号源A: 庄家信号 | 信号源B: 跨周期马丁")
+    print(f"  信号源A: 庄家信号 | 信号源B: 跨周期马丁 | 信号源C: 局内马丁")
     print(f"  马丁序列: {MARTIN_SEQ}")
     print(f"  [KEY] u=买UP  d=买DOWN  s=卖出  a=全部卖出  m=切换信号源  q=退出")
     print("=" * 55 + "\n")
