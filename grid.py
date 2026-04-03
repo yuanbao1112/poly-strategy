@@ -8,7 +8,7 @@ from datetime import datetime
 from web3 import Web3
 from dotenv import load_dotenv
 
-load_dotenv('/root/env6')
+load_dotenv('/root/env7')
 
 PRIVATE_KEY    = os.getenv("PRIVATE_KEY", "")
 API_KEY        = os.getenv("API_KEY", "")
@@ -25,9 +25,9 @@ MARKET_PERIOD = 300
 LOG_FILE      = "/root/grid.json"
 STATE_FILE    = "/root/grid_state.json"
 
-GRID_LOW      = 0.01
-GRID_HIGH     = 0.99
-GRID_COUNT    = 20
+GRID_LOW      = 0.30
+GRID_HIGH     = 0.70
+GRID_COUNT    = 10
 GRID_SIZE     = 5
 PROFIT_RATIO  = 1.10
 POLL_INTERVAL = 1
@@ -261,34 +261,41 @@ def run_grid_cycle(market):
     end_ts       = market["end_ts"]
     condition_id = market["market_id"]
 
-    # 计算20个网格价格
+    # 计算网格价格
     grid_prices = [round(GRID_LOW + i * (GRID_HIGH - GRID_LOW) / (GRID_COUNT - 1), 4) for i in range(GRID_COUNT)]
 
-    # 网格状态: {token_id: {price_str: {buy_order_id, sell_order_id, sell_price}}}
-    grid_state = {
-        up_token:   {str(p): {"buy_order_id": "", "sell_order_id": "", "sell_price": _calc_sell_price(p)} for p in grid_prices},
-        down_token: {str(p): {"buy_order_id": "", "sell_order_id": "", "sell_price": _calc_sell_price(p)} for p in grid_prices},
-    }
+    # 每个价位的状态
+    # state: "empty" | "buying" | "selling"
+    # buy_order_id: 当前挂出的买单ID
+    # sell_order_id: 当前挂出的卖单ID
+    # buy_price: 实际买入价（用于计算卖单价格）
+    grid_state = {}
+    for token_id in [up_token, down_token]:
+        grid_state[token_id] = {}
+        for p in grid_prices:
+            grid_state[token_id][p] = {
+                "state":        "empty",   # empty / buying / selling
+                "buy_order_id":  "",
+                "sell_order_id": "",
+                "buy_price":     p,        # 该格的买入价
+                "sell_price":    _calc_sell_price(p),  # 该格的卖出价
+            }
 
-    # 成交统计
     total_buy_filled  = 0
     total_sell_filled = 0
     round_profit      = 0.0
 
-    # 追踪已知的已成交买单，避免重复处理
-    processed_filled_buys  = {up_token: set(), down_token: set()}
-    processed_filled_sells = {up_token: set(), down_token: set()}
-
     print(f"[GRID] 开始网格周期 | 市场:{condition_id[:16]}... | 结束:{datetime.fromtimestamp(end_ts).strftime('%H:%M:%S')}")
     print(f"[GRID] 网格价格区间: {grid_prices[0]:.4f} ~ {grid_prices[-1]:.4f} | 共{GRID_COUNT}档")
 
-    # 初始挂单：UP + DOWN 各20单
+    # 初始挂单：UP + DOWN 各挂全部买单
     for token_id, label in [(up_token, "UP"), (down_token, "DOWN")]:
-        for price in grid_prices:
-            price_key = str(price)
-            oid = place_buy_order(token_id, price, GRID_SIZE, label=f"{label}@{price:.4f}")
+        for p in grid_prices:
+            slot = grid_state[token_id][p]
+            oid = place_buy_order(token_id, p, GRID_SIZE, label=f"{label}@{p:.4f}")
             if oid:
-                grid_state[token_id][price_key]["buy_order_id"] = oid
+                slot["buy_order_id"] = oid
+                slot["state"] = "buying"
 
     # 主扫描循环
     while True:
@@ -300,63 +307,64 @@ def run_grid_cycle(market):
             cancel_all_open_orders()
             break
 
-        # 对两个token各自进行扫描
         for token_id, label in [(up_token, "UP"), (down_token, "DOWN")]:
             try:
-                open_orders   = get_open_orders(token_id)
-                open_buy_ids  = {o["order_id"] for o in open_orders if o["side"].upper() == "BUY"}
-                open_sell_ids = {o["order_id"] for o in open_orders if o["side"].upper() == "SELL"}
-                open_buy_prices  = {round(o["price"], 4) for o in open_orders if o["side"].upper() == "BUY"}
+                open_orders = get_open_orders(token_id)
+                # 建立 order_id → order 的映射，方便快速查找
+                open_ids = {o["order_id"] for o in open_orders}
 
-                for price in grid_prices:
-                    price_key = str(price)
-                    slot      = grid_state[token_id][price_key]
-                    buy_oid   = slot["buy_order_id"]
-                    sell_oid  = slot["sell_order_id"]
+                for p in grid_prices:
+                    slot = grid_state[token_id][p]
 
-                    # 检查买单是否成交
-                    if buy_oid and buy_oid not in open_buy_ids and buy_oid not in processed_filled_buys[token_id]:
-                        # 买单已成交（不在挂单列表中且之前有记录）
-                        processed_filled_buys[token_id].add(buy_oid)
-                        total_buy_filled += 1
-                        slot["buy_order_id"] = ""
-                        print(f"[FILL] {label} 买单成交 @ {price:.4f} | 总成交买:{total_buy_filled}")
+                    if slot["state"] == "buying":
+                        buy_oid = slot["buy_order_id"]
+                        # 买单已成交（不在挂单列表中）
+                        if buy_oid and buy_oid not in open_ids:
+                            slot["buy_order_id"] = ""
+                            slot["state"] = "selling"
+                            total_buy_filled += 1
+                            sell_price = slot["sell_price"]
+                            print(f"[FILL] {label} 买单成交 @ {p:.4f} → 挂卖单 @ {sell_price:.2f}")
+                            # 挂卖单
+                            s_oid = place_sell_order(token_id, sell_price, GRID_SIZE, label=f"{label}卖@{sell_price:.2f}")
+                            if s_oid:
+                                slot["sell_order_id"] = s_oid
+                            else:
+                                # 卖单挂失败，回到empty状态重新挂买单
+                                slot["state"] = "empty"
 
-                        # 立即补挂买单（原价位）
-                        new_buy_oid = place_buy_order(token_id, price, GRID_SIZE, label=f"{label}补@{price:.4f}")
+                    elif slot["state"] == "selling":
+                        sell_oid = slot["sell_order_id"]
+                        # 卖单已成交（不在挂单列表中）
+                        if sell_oid and sell_oid not in open_ids:
+                            slot["sell_order_id"] = ""
+                            total_sell_filled += 1
+                            profit = round((slot["sell_price"] - slot["buy_price"]) * GRID_SIZE, 4)
+                            round_profit = round(round_profit + profit, 4)
+                            print(f"[FILL] {label} 卖单成交 @ {slot['sell_price']:.2f} 利润:+${profit:.4f} | 累计:+${round_profit:.4f}")
+                            # 卖单成交后，重新挂买单（回到buying状态）
+                            slot["state"] = "empty"
+                            new_buy_oid = place_buy_order(token_id, p, GRID_SIZE, label=f"{label}回落@{p:.4f}")
+                            if new_buy_oid:
+                                slot["buy_order_id"] = new_buy_oid
+                                slot["state"] = "buying"
+
+                    elif slot["state"] == "empty":
+                        # 空闲状态：挂买单
+                        new_buy_oid = place_buy_order(token_id, p, GRID_SIZE, label=f"{label}补@{p:.4f}")
                         if new_buy_oid:
                             slot["buy_order_id"] = new_buy_oid
-
-                        # 挂卖单（买入价 × PROFIT_RATIO）
-                        sell_price = slot["sell_price"]
-                        if not sell_oid:
-                            new_sell_oid = place_sell_order(token_id, sell_price, GRID_SIZE, label=f"{label}卖@{sell_price:.2f}")
-                            if new_sell_oid:
-                                slot["sell_order_id"] = new_sell_oid
-
-                    # 检查卖单是否成交
-                    if sell_oid and sell_oid not in open_sell_ids and sell_oid not in processed_filled_sells[token_id]:
-                        processed_filled_sells[token_id].add(sell_oid)
-                        total_sell_filled += 1
-                        sell_price = slot["sell_price"]
-                        profit = round((sell_price - price) * GRID_SIZE, 4)
-                        round_profit = round(round_profit + profit, 4)
-                        slot["sell_order_id"] = ""
-                        print(f"[FILL] {label} 卖单成交 @ {sell_price:.2f} 利润:+${profit:.4f} | 总成交卖:{total_sell_filled} 累计:+${round_profit:.4f}")
-
-                    # 检查网格完整性：买单缺失则补挂
-                    if not slot["buy_order_id"] and price not in open_buy_prices:
-                        new_buy_oid = place_buy_order(token_id, price, GRID_SIZE, label=f"{label}补缺@{price:.4f}")
-                        if new_buy_oid:
-                            slot["buy_order_id"] = new_buy_oid
+                            slot["state"] = "buying"
 
             except Exception as e:
                 print(f"[ERROR] 扫描{label}: {e}")
 
-        # 统计当前挂单数
-        up_buy_count   = sum(1 for p in grid_prices if grid_state[up_token][str(p)]["buy_order_id"])
-        down_buy_count = sum(1 for p in grid_prices if grid_state[down_token][str(p)]["buy_order_id"])
-        print(f"[GRID] 剩余{remaining}s | UP买单:{up_buy_count}/{GRID_COUNT} DOWN买单:{down_buy_count}/{GRID_COUNT} | 已成交买:{total_buy_filled} 卖:{total_sell_filled} | 本轮盈利:${round_profit:.2f}")
+        # 统计
+        up_buy_count   = sum(1 for p in grid_prices if grid_state[up_token][p]["state"] == "buying")
+        up_sell_count  = sum(1 for p in grid_prices if grid_state[up_token][p]["state"] == "selling")
+        dn_buy_count   = sum(1 for p in grid_prices if grid_state[down_token][p]["state"] == "buying")
+        dn_sell_count  = sum(1 for p in grid_prices if grid_state[down_token][p]["state"] == "selling")
+        print(f"[GRID] 剩余{remaining}s | UP买:{up_buy_count} 卖:{up_sell_count} | DOWN买:{dn_buy_count} 卖:{dn_sell_count} | 成交买:{total_buy_filled} 卖:{total_sell_filled} | 盈利:${round_profit:.4f}")
 
         time.sleep(POLL_INTERVAL)
 
