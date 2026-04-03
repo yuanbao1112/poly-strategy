@@ -235,6 +235,11 @@ def redeem_thread(condition_id):
             time.sleep(10)
 
 
+def _calc_sell_price(buy_price):
+    """Calculate the sell price as buy_price × PROFIT_RATIO, rounded to 2 dp and capped at 0.99."""
+    return min(round(round(buy_price * PROFIT_RATIO / 0.01) * 0.01, 2), 0.99)
+
+
 def load_stats():
     if os.path.exists(LOG_FILE):
         try:
@@ -259,10 +264,10 @@ def run_grid_cycle(market):
     # 计算20个网格价格
     grid_prices = [round(GRID_LOW + i * (GRID_HIGH - GRID_LOW) / (GRID_COUNT - 1), 4) for i in range(GRID_COUNT)]
 
-    # 网格状态: {token_id: {price_str: {buy_order_id, sell_order_id}}}
+    # 网格状态: {token_id: {price_str: {buy_order_id, sell_order_id, sell_price}}}
     grid_state = {
-        up_token:   {str(p): {"buy_order_id": "", "sell_order_id": ""} for p in grid_prices},
-        down_token: {str(p): {"buy_order_id": "", "sell_order_id": ""} for p in grid_prices},
+        up_token:   {str(p): {"buy_order_id": "", "sell_order_id": "", "sell_price": _calc_sell_price(p)} for p in grid_prices},
+        down_token: {str(p): {"buy_order_id": "", "sell_order_id": "", "sell_price": _calc_sell_price(p)} for p in grid_prices},
     }
 
     # 成交统计
@@ -323,8 +328,7 @@ def run_grid_cycle(market):
                             slot["buy_order_id"] = new_buy_oid
 
                         # 挂卖单（买入价 × PROFIT_RATIO）
-                        sell_price = round(round(price * PROFIT_RATIO / 0.01) * 0.01, 2)
-                        sell_price = min(sell_price, 0.99)
+                        sell_price = slot["sell_price"]
                         if not sell_oid:
                             new_sell_oid = place_sell_order(token_id, sell_price, GRID_SIZE, label=f"{label}卖@{sell_price:.2f}")
                             if new_sell_oid:
@@ -334,8 +338,7 @@ def run_grid_cycle(market):
                     if sell_oid and sell_oid not in open_sell_ids and sell_oid not in processed_filled_sells[token_id]:
                         processed_filled_sells[token_id].add(sell_oid)
                         total_sell_filled += 1
-                        sell_price = round(round(price * PROFIT_RATIO / 0.01) * 0.01, 2)
-                        sell_price = min(sell_price, 0.99)
+                        sell_price = slot["sell_price"]
                         profit = round((sell_price - price) * GRID_SIZE, 4)
                         round_profit = round(round_profit + profit, 4)
                         slot["sell_order_id"] = ""
