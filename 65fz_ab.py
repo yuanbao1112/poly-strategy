@@ -49,14 +49,14 @@ CTF_ABI  = [{"inputs":[{"name":"collateralToken","type":"address"},{"name":"pare
 USDC_ABI = [{"inputs":[{"name":"account","type":"address"}],"name":"balanceOf","outputs":[{"name":"","type":"uint256"}],"stateMutability":"view","type":"function"}]
 SAFE_ABI = [
     {"inputs":[],"name":"nonce","outputs":[{"type":"uint256"}],"stateMutability":"view","type":"function"},
-    {"inputs":[{"name":"to","type":"address"},{"name":"value","type":"uint256"},{"name":"data","type":"bytes"},{"name":"operation","type":"uint8"},{"name":"safeTxGas","type":"uint256"},{"name":"baseGas","type":"uint256"},{"name":"gasPrice","type":"uint256"},{"name":"gasToken","type":"address"},{"name":"refundReceiver","type":"address"},{"name":"signatures","type":"bytes"}],"name":"execTransaction","outputs":[{"type":"bool"}],"stateMutability":"payable","type":"function"},
-    {"inputs":[{"name":"to","type":"address"},{"name":"value","type":"uint256"},{"name":"data","type":"bytes"},{"name":"operation","type":"uint8"},{"name":"safeTxGas","type":"uint256"},{"name":"baseGas","type":"uint256"},{"name":"gasPrice","type":"uint256"},{"name":"gasToken","type":"address"},{"name":"refundReceiver","type":"address"},{"name":"_nonce","type":"uint256"}],"name":"getTransactionHash","outputs":[{"type":"bytes32"}],"stateMutability":"view","type":"function"}
+    {"inputs":[{"name":"to","type":"address"},{"name":"value","type":"uint256"},{"name":"data","type":"bytes"},{"name":"operation","type":"uint8"},{"name":"safeTxGas","type":"uint256"},{"name":"baseGas","type":"uint256"},{"name":"gasPrice","type":"uint256"},{"name":"gasToken","type":"address"},{"name":"refundReceiver","type":"address"},{"name":"nonce","type":"uint256"}],"name":"getTransactionHash","outputs":[{"type":"bytes32"}],"stateMutability":"view","type":"function"},
+    {"inputs":[{"name":"to","type":"address"},{"name":"value","type":"uint256"},{"name":"data","type":"bytes"},{"name":"operation","type":"uint8"},{"name":"safeTxGas","type":"uint256"},{"name":"baseGas","type":"uint256"},{"name":"gasPrice","type":"uint256"},{"name":"gasToken","type":"address"},{"name":"refundReceiver","type":"address"},{"name":"signatures","type":"bytes"}],"name":"execTransaction","outputs":[{"name":"success","type":"bool"}],"stateMutability":"payable","type":"function"},
 ]
 
 manual_order_queue = []
 manual_lock        = threading.Lock()
 input_mode         = False
-signal_source      = "A"   # A=庄家信号  B=跨周期马丁  C=局内马丁
+signal_source      = "A"   # A=庄家信号  B=跨周期马丁  C=局内马丁  D=双向马丁
 MARTIN_SEQ         = [5, 15, 45, 135]  # 马丁序列
 
 def getch():
@@ -114,7 +114,7 @@ def keyboard_listener():
                 try:
                     sys.stdout.write("\n[手动] 卖出方向 (u=卖UP / d=卖DOWN): ")
                     sys.stdout.flush()
-                    dir_key = input("").strip().lower()
+                    dir_key = input("\"").strip().lower()
                     if dir_key not in ('u', 'd'):
                         print("[警告] 无效方向，请输入 u 或 d")
                     else:
@@ -139,6 +139,9 @@ def keyboard_listener():
                 elif signal_source == "B":
                     signal_source = "C"
                     label = "局内马丁"
+                elif signal_source == "C":
+                    signal_source = "D"
+                    label = "双向马丁"
                 else:
                     signal_source = "A"
                     label = "庄家信号"
@@ -243,7 +246,13 @@ def load_state():
                 return json.load(f)
         except:
             pass
-    return {"last_result": None, "last_bet": BASE_BET, "martin_step": 0}
+    return {
+        "last_result": None,
+        "last_bet": BASE_BET,
+        "martin_step": 0,
+        "d_martin_up_step": 0,
+        "d_martin_down_step": 0,
+    }
 
 def save_state(state):
     with open(STATE_FILE, "w") as f:
@@ -282,19 +291,22 @@ def save_stats(stats):
         json.dump(stats, f, indent=2, ensure_ascii=False)
 
 def print_stats(stats, state):
-    balance     = get_current_balance()
-    total       = stats["wins"] + stats["losses"]
-    win_rate    = (stats["wins"] / total * 100) if total > 0 else 0
-    last_res    = state.get("last_result", None)
-    last_bet    = state.get("last_bet", BASE_BET)
-    martin_step = state.get("martin_step", 0)
-    sig_label   = {"A": "庄家信号", "B": "跨周期马丁", "C": "局内马丁"}.get(signal_source, signal_source)
+    balance           = get_current_balance()
+    total             = stats["wins"] + stats["losses"]
+    win_rate          = (stats["wins"] / total * 100) if total > 0 else 0
+    last_res          = state.get("last_result", None)
+    last_bet          = state.get("last_bet", BASE_BET)
+    martin_step       = state.get("martin_step", 0)
+    d_up_step         = state.get("d_martin_up_step", 0)
+    d_dn_step         = state.get("d_martin_down_step", 0)
+    sig_label         = {"A": "庄家信号", "B": "跨周期马丁", "C": "局内马丁", "D": "双向马丁"}.get(signal_source, signal_source)
     print(f"\n{'='*55}")
     print(f"  BTC 5M 策略 (ab) | 信号源: {signal_source} {sig_label}")
     print(f"  总轮数: {stats['rounds']}  跳过: {stats.get('skips', 0)}")
     print(f"  胜/负: {stats['wins']}W {stats['losses']}L  胜率: {win_rate:.1f}%")
     print(f"  累计盈亏: ${stats['total_pnl']:.2f}")
     print(f"  上一局: {last_res or 'N/A'} ${last_bet:.2f}  马丁级别:{martin_step+1} 下注:${MARTIN_SEQ[min(martin_step, len(MARTIN_SEQ)-1)]}")
+    print(f"  [D模式] UP级别:{d_up_step+1}(${MARTIN_SEQ[min(d_up_step,len(MARTIN_SEQ)-1)]})  DOWN级别:{d_dn_step+1}(${MARTIN_SEQ[min(d_dn_step,len(MARTIN_SEQ)-1)]})")
     if balance is not None:
         print(f"  余额: ${balance:.2f}")
     print(f"{'='*55}\n")
@@ -477,14 +489,20 @@ def run_one_cycle(market, state):
     end_ts       = market["end_ts"]
     condition_id = market["market_id"]
 
-    martin_step_cross = state.get("martin_step", 0)
-    bet_amount        = MARTIN_SEQ[min(martin_step_cross, len(MARTIN_SEQ) - 1)]
+    martin_step_cross  = state.get("martin_step", 0)
+    bet_amount         = MARTIN_SEQ[min(martin_step_cross, len(MARTIN_SEQ) - 1)]
+
+    # D模式：双向各自的跨局马丁步数
+    d_up_step   = state.get("d_martin_up_step", 0)
+    d_down_step = state.get("d_martin_down_step", 0)
 
     this_bet  = BASE_BET
-    sig_label = {"A": "庄家信号", "B": "跨周期马丁", "C": "局内马丁"}.get(signal_source, signal_source)
+    sig_label = {"A": "庄家信号", "B": "跨周期马丁", "C": "局内马丁", "D": "双向马丁"}.get(signal_source, signal_source)
 
     print(f"\n{'='*55}")
     print(f"[新周期] {datetime.now().strftime('%H:%M:%S')} | 信号源:{sig_label} | 马丁级别:{martin_step_cross+1} 下注:${bet_amount}")
+    if signal_source == "D":
+        print(f"  [D模式] UP级别:{d_up_step+1}(${MARTIN_SEQ[min(d_up_step,len(MARTIN_SEQ)-1)]})  DOWN级别:{d_down_step+1}(${MARTIN_SEQ[min(d_down_step,len(MARTIN_SEQ)-1)]})")
     print(f"{'='*55}")
 
     price_feed.record_start_price()
@@ -500,6 +518,15 @@ def run_one_cycle(market, state):
 
     signal_down_count = 0
     signal_up_count   = 0
+
+    # D模式：记录本局两个方向是否已下单（每局各方向只下一次）
+    d_placed_up   = False
+    d_placed_down = False
+    # D模式：本局两个方向各自的入场信息（用于结算）
+    d_up_spent    = 0.0
+    d_up_price    = None
+    d_down_spent  = 0.0
+    d_down_price  = None
 
     while True:
         now       = time.time()
@@ -527,9 +554,15 @@ def run_one_cycle(market, state):
         in_entry_window = remaining <= ENTRY_WINDOW
 
         if not input_mode:
-            status  = f"入场:{entry_dir}" if placed else "未入场"
-            win_str = "[窗口内]" if in_entry_window else f"[{remaining}s后入窗]"
-            print(f"剩余{remaining:>4}秒 | UP:{up_p:.3f} DOWN:{dn_p:.3f} | 差价:{diff_str} | {status} ${total_spent:.2f} {win_str} [{sig_label}]")
+            if signal_source == "D":
+                up_status  = f"UP已入${d_up_spent:.2f}"   if d_placed_up   else "UP未入"
+                dn_status  = f"DOWN已入${d_down_spent:.2f}" if d_placed_down else "DOWN未入"
+                win_str    = "[窗口内]" if in_entry_window else f"[{remaining}s后入窗]"
+                print(f"剩余{remaining:>4}秒 | UP:{up_p:.3f} DOWN:{dn_p:.3f} | 差价:{diff_str} | {up_status} {dn_status} {win_str} [D]")
+            else:
+                status  = f"入场:{entry_dir}" if placed else "未入场"
+                win_str = "[窗口内]" if in_entry_window else f"[{remaining}s后入窗]"
+                print(f"剩余{remaining:>4}秒 | UP:{up_p:.3f} DOWN:{dn_p:.3f} | 差价:{diff_str} | {status} ${total_spent:.2f} {win_str} [{sig_label}]")
 
         # ── 手动操作处理 ──────────────────────────────────
         with manual_lock:
@@ -669,6 +702,38 @@ def run_one_cycle(market, state):
                         c_last_dir  = cur_strong
                         c_martin_step += 1
 
+        # ── 双向马丁 (D模式，UP和DOWN各自独立跨局马丁) ──────
+        if signal_source == "D":
+            cur_strong = None
+            if up_p > 0.65 and btc_diff > 66:
+                cur_strong = "UP"
+            elif dn_p > 0.65 and btc_diff > 66:
+                cur_strong = "DOWN"
+
+            if cur_strong == "UP" and not d_placed_up:
+                d_bet_up  = MARTIN_SEQ[min(d_up_step, len(MARTIN_SEQ) - 1)]
+                buy_price = up_p
+                print(f"  [双向马丁] UP触发 级别:{d_up_step+1} 下注:${d_bet_up} 价差:{diff_str}")
+                resp = place_order(up_token, d_bet_up, buy_price, f"双向马丁UP")
+                if resp:
+                    d_placed_up  = True
+                    d_up_spent   = round(d_bet_up, 2)
+                    d_up_price   = buy_price
+                    placed       = True
+                    total_spent  = round(total_spent + d_bet_up, 2)
+
+            elif cur_strong == "DOWN" and not d_placed_down:
+                d_bet_dn  = MARTIN_SEQ[min(d_down_step, len(MARTIN_SEQ) - 1)]
+                buy_price = dn_p
+                print(f"  [双向马丁] DOWN触发 级别:{d_down_step+1} 下注:${d_bet_dn} 价差:{diff_str}")
+                resp = place_order(down_token, d_bet_dn, buy_price, f"双向马丁DOWN")
+                if resp:
+                    d_placed_down = True
+                    d_down_spent  = round(d_bet_dn, 2)
+                    d_down_price  = buy_price
+                    placed        = True
+                    total_spent   = round(total_spent + d_bet_dn, 2)
+
         time.sleep(POLL_INTERVAL)
 
     # ── 结算 ──────────────────────────────────────────────
@@ -684,6 +749,48 @@ def run_one_cycle(market, state):
         price_feed.reset_start_price()
         return "skip", condition_id, 0, 0, state
 
+    # ── D模式结算：两个方向分别算盈亏，分别更新马丁步数 ──
+    if signal_source == "D":
+        net = 0.0
+        new_d_up_step   = d_up_step
+        new_d_down_step = d_down_step
+
+        if d_placed_up:
+            if final_winner == "UP":
+                up_net = round(d_up_spent / d_up_price - d_up_spent, 2)
+                net    = round(net + up_net, 2)
+                new_d_up_step = 0
+                print(f"[结算] UP  WIN  ${d_up_spent:.2f} @ {d_up_price:.3f} -> +${up_net:.2f}  [重置级别1]")
+            else:
+                net           = round(net - d_up_spent, 2)
+                new_d_up_step = min(d_up_step + 1, len(MARTIN_SEQ) - 1)
+                print(f"[结算] UP  LOSE ${d_up_spent:.2f} @ {d_up_price:.3f} -> -${d_up_spent:.2f}  [升级->{new_d_up_step+1}]")
+
+        if d_placed_down:
+            if final_winner == "DOWN":
+                dn_net = round(d_down_spent / d_down_price - d_down_spent, 2)
+                net    = round(net + dn_net, 2)
+                new_d_down_step = 0
+                print(f"[结算] DOWN WIN  ${d_down_spent:.2f} @ {d_down_price:.3f} -> +${dn_net:.2f}  [重置级别1]")
+            else:
+                net             = round(net - d_down_spent, 2)
+                new_d_down_step = min(d_down_step + 1, len(MARTIN_SEQ) - 1)
+                print(f"[结算] DOWN LOSE ${d_down_spent:.2f} @ {d_down_price:.3f} -> -${d_down_spent:.2f}  [升级->{new_d_down_step+1}]")
+
+        print(f"[结算] 净盈亏: ${net:+.2f}")
+        result    = "win" if net > 0 else "loss"
+        new_state = {
+            "last_result":        result,
+            "last_bet":           total_spent,
+            "martin_step":        martin_step_cross,
+            "d_martin_up_step":   new_d_up_step,
+            "d_martin_down_step": new_d_down_step,
+        }
+        threading.Thread(target=redeem_thread, args=(condition_id,), daemon=True).start()
+        price_feed.reset_start_price()
+        return result, condition_id, total_spent, net, new_state
+
+    # ── A/B/C 模式结算 ────────────────────────────────────
     if entry_dir == final_winner:
         net = round(total_spent / entry_price - total_spent, 2)
         print(f"[结算] WIN  {entry_dir} ${total_spent:.2f} @ {entry_price:.3f} -> +${net:.2f}")
@@ -702,7 +809,13 @@ def run_one_cycle(market, state):
     else:
         new_martin_step = martin_step_cross
 
-    new_state = {"last_result": result, "last_bet": total_spent, "martin_step": new_martin_step}
+    new_state = {
+        "last_result":        result,
+        "last_bet":           total_spent,
+        "martin_step":        new_martin_step,
+        "d_martin_up_step":   state.get("d_martin_up_step", 0),
+        "d_martin_down_step": state.get("d_martin_down_step", 0),
+    }
 
     threading.Thread(target=redeem_thread, args=(condition_id,), daemon=True).start()
     price_feed.reset_start_price()
@@ -716,9 +829,10 @@ def main():
 
     print("=" * 55)
     print("  BTC 5M 策略 (ab)")
-    print(f"  信号源A: 庄家信号 | 信号源B: 跨周期马丁 | 信号源C: 局内马丁")
+    print(f"  信号源A: 庄家信号 | 信号源B: 跨周期马丁 | 信号源C: 局内马丁 | 信号源D: 双向马丁")
     print(f"  马丁序列: {MARTIN_SEQ}")
-    print(f"  [KEY] u=买UP  d=买DOWN  s=卖出  a=全部卖出  m=切换信号源  q=退出")
+    print(f"  [D模式说明] UP/DOWN各自独立跨局马丁，触发条件: 价格>0.65且BTC价差>$66")
+    print(f"  [KEY] u=买UP  d=买DOWN  s=卖出  a=全部卖出  m=切换信号源(A->B->C->D->A)  q=退出")
     print("=" * 55 + "\n")
 
     price_feed.start()
