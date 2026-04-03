@@ -8,7 +8,7 @@ import sys
 import tty
 import termios
 import atexit
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 from web3 import Web3
 from dotenv import load_dotenv
 
@@ -28,24 +28,32 @@ if _missing:
     raise EnvironmentError(f"[ERROR] 环境变量未设置: {', '.join(_missing)}")
 
 # ── 策略参数 ──────────────────────────────────────────
-PRICE_LEVELS    = [0.01, 0.02, 0.03, 0.04, 0.05]
-BUY_SIZE        = 5
-MARKET_PERIOD   = 300
-
-ENABLE_BTC_FILTER = False
-BTC_DIFF_MAX      = 25.0
+PRICE_LEVELS   = [0.01, 0.02, 0.03, 0.04, 0.05]
+BUY_SIZE       = 5
+MARKET_PERIOD  = 300          # 5分钟 = 300秒
+CANCEL_DELAY   = 60           # 市场结束后1分钟取消挂单
+COST_PER_MARKET = sum(PRICE_LEVELS) * BUY_SIZE * 2  # 每个市场成本 $1.5
 
 CLOB_API     = "https://clob.polymarket.com"
 GAMMA_API    = "https://gamma-api.polymarket.com"
 POLYGON_RPC  = "https://polygon-mainnet.g.alchemy.com/v2/JWvS9PwN79OdjMaDAc5x3"
-CTF_ADDRESS  = "0x4D97DCd97eC945f40cF65F87097ACe5EA0476045"
 USDC_ADDRESS = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174"
 LOG_FILE     = "/root/5cfz.json"
 
 USDC_ABI = [{"inputs":[{"name":"account","type":"address"}],"name":"balanceOf","outputs":[{"name":"","type":"uint256"}],"stateMutability":"view","type":"function"}]
 
-# 全局槽位：跨局持续维护，key=(direction, price), value=order_id or None
-global_slots = {}
+# ── 全局状态 ──────────────────────────────────────────
+# market_states[condition_id] = {
+#   "up_token": ..., "down_token": ...,
+#   "start_ts": ..., "end_ts": ...,
+#   "slots": {(direction, price): order_id or None},
+#   "ever_placed": bool,   # 是否曾挂过单
+#   "cancelled": bool,     # 是否已取消
+# }
+market_states = {}
+today_markets  = []   # 今天所有市场按start_ts排序
+next_market_idx = 0   # 下一个待挂单的市场索引
+
 
 def getch():
     fd  = sys.stdin.fileno()
@@ -56,8 +64,8 @@ def getch():
     finally:
         termios.tcsetattr(fd, termios.TCSADRAIN, old)
 
+
 def keyboard_listener():
-    print("[KEY] q=退出")
     while True:
         try:
             key = getch()
@@ -67,6 +75,7 @@ def keyboard_listener():
         except Exception:
             time.sleep(0.1)
 
+
 def get_current_balance():
     try:
         w3   = Web3(Web3.HTTPProvider(POLYGON_RPC))
@@ -75,15 +84,6 @@ def get_current_balance():
     except:
         return None
 
-def get_market_price(up_token):
-    try:
-        r = requests.get(CLOB_API + "/midpoint", params={"token_id": up_token}, timeout=3)
-        if r.status_code == 200:
-            up_price = float(r.json().get("mid", 0.5))
-            return up_price, round(1 - up_price, 4)
-        return None, None
-    except:
-        return None, None
 
 def get_client():
     from py_clob_client.client import ClobClient
@@ -91,33 +91,156 @@ def get_client():
     creds = ApiCreds(api_key=API_KEY, api_secret=API_SECRET, api_passphrase=API_PASSPHRASE)
     return ClobClient(host=CLOB_API, chain_id=137, key=PRIVATE_KEY, creds=creds, signature_type=2, funder=WALLET_ADDRESS)
 
-def get_open_order_ids():
-    """获取当前所有活跃挂单的order_id集合"""
+
+def get_all_open_orders():
+    """返回所有活跃挂单列表，包含order_id和token_id"""
     try:
         client = get_client()
         orders = client.get_orders()
         if isinstance(orders, list):
-            return {o.get("id") or o.get("orderID") for o in orders if o.get("status") in ("LIVE", "OPEN", None)}
-        return set()
+            return [o for o in orders if o.get("status") in ("LIVE", "OPEN", None)]
+        return []
     except Exception as e:
-        print(f"  [WARN] 获取挂单列表失败: {e}")
-        return set()
+        print(f"  [WARN] 获取挂单失败: {e}")
+        return []
 
-def place_order(token_id, size, price, label=""): 
+
+def cancel_order(order_id, label=""):
+    try:
+        client = get_client()
+        client.cancel(order_id)
+        print(f"  [取消] {label} ID:{order_id}")
+        return True
+    except Exception as e:
+        print(f"  [WARN] 取消失败 {label} ID:{order_id}: {e}")
+        return False
+
+
+def place_order(token_id, size, price, label=""):
     from py_clob_client.clob_types import OrderArgs, OrderType
     from py_clob_client.order_builder.constants import BUY
-    amount_usd = round(size * price, 4)
     try:
         client   = get_client()
         order    = OrderArgs(token_id=token_id, price=price, size=size, side=BUY)
         signed   = client.create_order(order)
         resp     = client.post_order(signed, OrderType.GTC)
         order_id = resp.get("orderID", "N/A") if isinstance(resp, dict) else "N/A"
-        print(f"  [挂单] {label}: {size}股 @ {price:.2f} = ${amount_usd:.4f} | ID:{order_id}")
+        print(f"  [挂单] {label}: {size}股 @ {price:.2f} = ${round(size*price,4):.4f} | ID:{order_id}")
         return order_id if order_id != "N/A" else None
     except Exception as e:
         print(f"  [ERROR] 挂单失败 {label}: {e}")
         return None
+
+
+def resolve_market_tokens(condition_id):
+    """从CLOB获取市场的up/down token_id"""
+    try:
+        r = requests.get(CLOB_API + f"/markets/{condition_id}", timeout=5)
+        if r.status_code != 200:
+            return None, None
+        tokens = r.json().get("tokens", [])
+        up_token = down_token = None
+        for t in tokens:
+            o = t.get("outcome", "").lower()
+            if o in ("up", "yes"):
+                up_token = t.get("token_id")
+            elif o in ("down", "no"):
+                down_token = t.get("token_id")
+        return up_token, down_token
+    except:
+        return None, None
+
+
+def fetch_today_markets():
+    """查询今天所有BTC 5分钟市场，按start_ts排序返回"""
+    now = int(time.time())
+    # 今天UTC 0点
+    today_utc = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
+    day_start = int(today_utc.timestamp())
+    day_end   = day_start + 86400
+
+    markets = []
+    # 生成今天所有288个时间槽
+    ts = day_start
+    while ts < day_end:
+        markets.append({"start_ts": ts, "end_ts": ts + MARKET_PERIOD, "condition_id": None,
+                        "up_token": None, "down_token": None, "fetched": False})
+        ts += MARKET_PERIOD
+
+    print(f"  [初始化] 今天共{len(markets)}个市场时间槽，开始查询...")
+
+    # 批量查询（只查未来和当前的，跳过已结束的）
+    valid = []
+    for m in markets:
+        if m["end_ts"] <= now:
+            continue  # 已结束跳过
+        slug = f"btc-updown-5m-{m['start_ts']}"
+        try:
+            r = requests.get(GAMMA_API + "/markets", params={"slug": slug}, timeout=5)
+            if r.status_code != 200:
+                time.sleep(0.1)
+                continue
+            data = r.json()
+            if not data:
+                time.sleep(0.1)
+                continue
+            info = data[0]
+            if info.get("closed", True):
+                time.sleep(0.1)
+                continue
+            condition_id = info.get("conditionId", "")
+            if not condition_id:
+                time.sleep(0.1)
+                continue
+            up_token, down_token = resolve_market_tokens(condition_id)
+            if not up_token or not down_token:
+                time.sleep(0.1)
+                continue
+            m["condition_id"] = condition_id
+            m["up_token"]     = up_token
+            m["down_token"]   = down_token
+            m["fetched"]      = True
+            valid.append(m)
+            time.sleep(0.15)
+        except Exception as e:
+            print(f"  [WARN] 查询市场失败 ts={m['start_ts']}: {e}")
+            time.sleep(0.2)
+
+    print(f"  [初始化] 查到{len(valid)}个有效市场")
+    return sorted(valid, key=lambda x: x["start_ts"])
+
+
+def place_market_orders(m):
+    """给一个市场挂满10个单，返回slots dict"""
+    cid = m["condition_id"]
+    slots = {}
+    print(f"  [挂单] 市场 {cid[:12]}... start={datetime.fromtimestamp(m['start_ts']).strftime('%H:%M')}")
+    for lv in PRICE_LEVELS:
+        for direction, token_id in [("UP", m["up_token"]), ("DOWN", m["down_token"]):
+            oid = place_order(token_id, BUY_SIZE, lv, f"{direction}@{int(lv*100)}c")
+            slots[(direction, lv)] = oid
+            time.sleep(0.3)
+    return slots
+
+
+def cancel_market_orders(cid, slots):
+    """取消某市场所有未成交挂单"""
+    print(f"  [取消] 市场 {cid[:12]}... 取消未成交挂单")
+    all_open = get_all_open_orders()
+    open_map = {}
+    for o in all_open:
+        oid = o.get("id") or o.get("orderID")
+        if oid:
+            open_map[oid] = o
+
+    cancelled = 0
+    for (direction, lv), oid in slots.items():
+        if oid and oid in open_map:
+            if cancel_order(oid, f"{direction}@{int(lv*100)}c"):
+                cancelled += 1
+            time.sleep(0.2)
+    print(f"  [取消完成] 取消了{cancelled}个挂单")
+
 
 def load_stats():
     if os.path.exists(LOG_FILE):
@@ -128,150 +251,181 @@ def load_stats():
             pass
     return {"rounds": 0, "history": []}
 
+
 def save_stats(stats):
     with open(LOG_FILE, "w") as f:
         json.dump(stats, f, indent=2, ensure_ascii=False)
 
-def get_active_btc_market():
-    try:
-        now    = int(time.time())
-        period = (now // MARKET_PERIOD) * MARKET_PERIOD
-        for ts in [period, period + MARKET_PERIOD, period - MARKET_PERIOD]:
-            slug = f"btc-updown-5m-{ts}"
-            r    = requests.get(GAMMA_API + "/markets", params={"slug": slug}, timeout=5)
-            if r.status_code != 200:
-                continue
-            markets = r.json()
-            if not markets:
-                continue
-            m = markets[0]
-            if m.get("closed", True):
-                continue
-            condition_id = m.get("conditionId", "")
-            if not condition_id:
-                continue
-            r2 = requests.get(CLOB_API + f"/markets/{condition_id}", timeout=5)
-            if r2.status_code != 200:
-                continue
-            tokens = r2.json().get("tokens", [])
-            up_token = down_token = None
-            for t in tokens:
-                o = t.get("outcome", "").lower()
-                if o in ("up", "yes"):
-                    up_token = t.get("token_id")
-                elif o in ("down", "no"):
-                    down_token = t.get("token_id")
-            if up_token and down_token:
-                return {
-                    "market_id":  condition_id,
-                    "up_token":   up_token,
-                    "down_token": down_token,
-                    "end_ts":     ts + MARKET_PERIOD,
-                    "start_ts":   ts
-                }
-        return None
-    except:
-        return None
-
-def replenish_missing(token_map):
-    """检查全局slots，只补缺失的单"""
-    open_ids = get_open_order_ids()
-
-    missing = []
-    for key, oid in global_slots.items():
-        if oid is None or oid not in open_ids:
-            missing.append(key)
-
-    if not missing:
-        print(f"  [检查] 10个单全部在挂单中，无需补单")
-        return
-
-    print(f"  [补单] 发现{len(missing)}个缺失，开始补: {[(d, int(p*100)) for d,p in missing]}")
-    for (direction, lv) in missing:
-        oid = place_order(token_map[direction], BUY_SIZE, lv, f"补{direction}@{int(lv*100)}c")
-        global_slots[(direction, lv)] = oid
-        time.sleep(0.3)
-
-def run_one_cycle(market):
-    global global_slots
-
-    up_token     = market["up_token"]
-    down_token   = market["down_token"]
-    end_ts       = market["end_ts"]
-    condition_id = market["market_id"]
-
-    token_map = {"UP": up_token, "DOWN": down_token}
-
-    print(f"\n{'='*55}")
-    print(f"[新周期] {datetime.now().strftime('%H:%M:%S')} | 市场:{condition_id[:12]}...")
-    print(f"{'='*55}")
-
-    up_p, dn_p = get_market_price(up_token)
-    if up_p is not None:
-        print(f"  当前 UP:{up_p:.3f} DOWN:{dn_p:.3f}")
-
-    # 初始化slots（第一次运行）
-    if not global_slots:
-        print(f"  [首次] 初始化10个槽位并全部挂单")
-        for lv in PRICE_LEVELS:
-            for direction in ["UP", "DOWN"]:
-                global_slots[(direction, lv)] = None
-
-    # 每局开始检查并补缺失的单
-    replenish_missing(token_map)
-
-    placed = sum(1 for v in global_slots.values() if v)
-    print(f"  [状态] 当前有效挂单: {placed}/10 | 等待周期结束...")
-
-    # 等待本局结束
-    while time.time() < end_ts:
-        time.sleep(5)
-
-    print(f"  [周期结束] {datetime.now().strftime('%H:%M:%S')}")
 
 def main():
+    global today_markets, next_market_idx, market_states
+
     atexit.register(lambda: os.system("stty sane"))
     stats = load_stats()
 
-    print("=" * 55)
-    print("  BTC 5M 多档位反转策略 (1c~5c)")
+    print("=" * 60)
+    print("  BTC 5M 多档位反转策略 (1c~5c) — 全天滚动挂单版")
     print(f"  挂单价位: {[f'{int(p*100)}c' for p in PRICE_LEVELS]}")
-    print(f"  每位各买: {BUY_SIZE}股 (UP+DOWN)")
-    print(f"  补单时机: 新一局开始时检查并补缺失单")
+    print(f"  每位各买: {BUY_SIZE}股 (UP+DOWN)  每市场成本: ${COST_PER_MARKET:.2f}")
+    print(f"  补单时机: 新局开始 | 取消时机: 结束后{CANCEL_DELAY}s")
     print(f"  [KEY] q=退出")
-    print("=" * 55 + "\n")
+    print("=" * 60 + "\n")
 
     balance = get_current_balance()
-    if balance is not None:
-        print(f"  当前余额: ${balance:.2f}\n")
+    bal_str = f"${balance:.2f}" if balance is not None else "获取失败"
+    print(f"  当前余额: {bal_str}\n")
 
     kb_thread = threading.Thread(target=keyboard_listener, daemon=True)
     kb_thread.start()
 
-    last_market_id = None
+    # ── 查询今天所有市场 ──
+    print("[初始化] 查询今天所有BTC 5分钟市场...")
+    today_markets = fetch_today_markets()
+    if not today_markets:
+        print("[ERROR] 未找到任何市场，退出")
+        return
+
+    now = int(time.time())
+
+    # ── 清理已结束市场的残留挂单 ──
+    print("\n[初始化] 检查已结束市场残留挂单...")
+    all_open = get_all_open_orders()
+    # 收集所有已结束市场的token_id
+    ended_tokens = set()
+    for m in today_markets:
+        # 这里today_markets只含未结束的，不需要清理
+        pass
+    # 如果账户有挂单但不属于任何today_markets的token，视为已结束市场残留
+    valid_tokens = set()
+    for m in today_markets:
+        valid_tokens.add(m["up_token"])
+        valid_tokens.add(m["down_token"])
+    stale = [o for o in all_open if o.get("asset_id") not in valid_tokens]
+    if stale:
+        print(f"  [清理] 发现{len(stale)}个已结束市场残留挂单，取消中...")
+        for o in stale:
+            oid = o.get("id") or o.get("orderID")
+            if oid:
+                cancel_order(oid, "残留单")
+                time.sleep(0.2)
+    else:
+        print("  [清理] 无残留挂单")
+
+    # ── 初始挂单：从第一个市场开始，余额够就挂 ──
+    print(f"\n[初始化] 开始初始挂单（余额:{bal_str}，每市场${COST_PER_MARKET:.2f}）...")
+    next_market_idx = 0
+    for i, m in enumerate(today_markets):
+        balance = get_current_balance()
+        if balance is None or balance < COST_PER_MARKET:
+            print(f"  [停止] 余额${balance:.2f if balance else 0}不足，已挂{i}个市场")
+            next_market_idx = i
+            break
+        cid = m["condition_id"]
+        slots = place_market_orders(m)
+        market_states[cid] = {
+            "up_token":    m["up_token"],
+            "down_token":  m["down_token"],
+            "start_ts":    m["start_ts"],
+            "end_ts":      m["end_ts"],
+            "slots":       slots,
+            "ever_placed": True,
+            "cancelled":   False,
+        }
+        next_market_idx = i + 1
+        time.sleep(0.5)
+    else:
+        next_market_idx = len(today_markets)
+
+    print(f"\n[运行中] 初始挂单完成，共挂{len(market_states)}个市场 | 开始主循环...")
+
+    # ── 主循环 ──
+    cancel_queue = []  # [(cancel_after_ts, condition_id)]
 
     while True:
         try:
-            market = get_active_btc_market()
-            if market is None:
-                print("[等待] 寻找市场中...")
-                time.sleep(5)
-                continue
+            now = int(time.time())
 
-            if market["market_id"] == last_market_id:
-                time.sleep(2)
-                continue
+            # 1. 执行到期的取消任务
+            still_pending = []
+            for (cancel_at, cid) in cancel_queue:
+                if now >= cancel_at:
+                    if cid in market_states and not market_states[cid]["cancelled"]:
+                        cancel_market_orders(cid, market_states[cid]["slots"])
+                        market_states[cid]["cancelled"] = True
+                        # 取消后尝试挂下一个市场
+                        balance = get_current_balance()
+                        if balance is not None and balance >= COST_PER_MARKET and next_market_idx < len(today_markets):
+                            nm = today_markets[next_market_idx]
+                            ncid = nm["condition_id"]
+                            if ncid not in market_states:
+                                print(f"\n[滚动] 余额回笼${balance:.2f}，挂下一个市场...")
+                                slots = place_market_orders(nm)
+                                market_states[ncid] = {
+                                    "up_token":    nm["up_token"],
+                                    "down_token":  nm["down_token"],
+                                    "start_ts":    nm["start_ts"],
+                                    "end_ts":      nm["end_ts"],
+                                    "slots":       slots,
+                                    "ever_placed": True,
+                                    "cancelled":   False,
+                                }
+                                next_market_idx += 1
+                else:
+                    still_pending.append((cancel_at, cid))
+            cancel_queue = still_pending
 
-            last_market_id = market["market_id"]
-            stats["rounds"] = stats.get("rounds", 0) + 1
-            stats["history"].append({
-                "time":   datetime.now().strftime("%Y-%m-%d %H:%M"),
-                "market": market["market_id"],
-            })
-            stats["history"] = stats["history"][-200:]
-            save_stats(stats)
+            # 2. 检查各市场状态
+            for m in today_markets:
+                cid = m["condition_id"]
+                start_ts = m["start_ts"]
+                end_ts   = m["end_ts"]
 
-            run_one_cycle(market)
+                # 已结束市场：加入取消队列
+                if now >= end_ts:
+                    if cid in market_states and not market_states[cid]["cancelled"]:
+                        cancel_at = end_ts + CANCEL_DELAY
+                        if (cancel_at, cid) not in cancel_queue:
+                            cancel_queue.append((cancel_at, cid))
+                    continue
+
+                # 当前进行中或未来的市场
+                if cid not in market_states:
+                    # 从未挂过单：如果是当前局，挂单
+                    if start_ts <= now < end_ts:
+                        balance = get_current_balance()
+                        if balance is not None and balance >= COST_PER_MARKET:
+                            print(f"\n[补挂] 当前局未挂过单，现在挂...")
+                            slots = place_market_orders(m)
+                            market_states[cid] = {
+                                "up_token":    m["up_token"],
+                                "down_token":  m["down_token"],
+                                "start_ts":    start_ts,
+                                "end_ts":      end_ts,
+                                "slots":       slots,
+                                "ever_placed": True,
+                                "cancelled":   False,
+                            }
+                    # 未来市场：等滚动补充，不在这里处理
+                else:
+                    state = market_states[cid]
+                    # 当前进行中且曾挂过单：本局不补（已成交的缺单不补）
+                    # 只打印状态
+                    if start_ts <= now < end_ts:
+                        active_count = sum(1 for v in state["slots"].values() if v)
+                        # 不补单，仅记录
+
+            # 3. 打印当前状态（每5分钟一次）
+            active_markets = [m for m in today_markets if m["start_ts"] <= now < m["end_ts"]]
+            if active_markets:
+                m = active_markets[0]
+                cid = m["condition_id"]
+                remaining = int(m["end_ts"] - now)
+                placed_count = len([k for k, v in market_states.get(cid, {}).get("slots", {}).items() if v])
+                print(f"[{datetime.now().strftime('%H:%M:%S')}] 当前市场:{cid[:12]}... 剩余{remaining}s | "
+                      f"已挂市场:{len(market_states)}个 | 待挂:{max(0,len(today_markets)-next_market_idx)}个 | "
+                      f"取消队列:{len(cancel_queue)}个")
+
+            time.sleep(30)
 
         except KeyboardInterrupt:
             print("\n[退出] 策略已停止")
@@ -279,6 +433,7 @@ def main():
         except Exception as e:
             print(f"[ERROR] 主循环异常: {e}")
             time.sleep(10)
+
 
 if __name__ == "__main__":
     main()
