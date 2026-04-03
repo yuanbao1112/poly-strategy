@@ -29,17 +29,17 @@ if _missing:
     raise EnvironmentError(f"[ERROR] 环境变量未设置: {', '.join(_missing)}")
 
 # ─────────────────────────────────────────────
-#  ★ 可热修改参数（按 P 键进入调参菜单）
+#  可热修改参数（按 P 键进入调参菜单）
 # ─────────────────────────────────────────────
-BASE_BET          = 1.0    # 底注金额 (USDC)
-MARTIN_MULTIPLIER = 3      # 马丁加仓倍数
-ENTRY_MIN_PRICE   = 0.65   # 入场最低价格阈值 (0~1)
-ENTRY_MIN_DIFF    = 25     # 入场BTC价差阈值 (USD)
-WIN_PRICE         = 0.80   # 判赢价格线 (0~1)
+BASE_BET          = 1.0
+MARTIN_MULTIPLIER = 3.0
+ENTRY_MIN_PRICE   = 0.65
+ENTRY_MIN_DIFF    = 25.0
+WIN_PRICE         = 0.80
 
-MAX_LOSS_STREAK   = 10
-MARKET_PERIOD     = 300
-POLL_INTERVAL     = 1
+MAX_LOSS_STREAK = 10
+MARKET_PERIOD   = 300
+POLL_INTERVAL   = 1
 
 CLOB_API     = "https://clob.polymarket.com"
 GAMMA_API    = "https://gamma-api.polymarket.com"
@@ -47,14 +47,14 @@ POLYGON_RPC  = "https://polygon-mainnet.g.alchemy.com/v2/JWvS9PwN79OdjMaDAc5x3"
 CTF_ADDRESS  = "0x4D97DCd97eC945f40cF65F87097ACe5EA0476045"
 USDC_ADDRESS = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174"
 LOG_FILE     = "/root/btc5m_martin_log.json"
-PARAM_FILE   = "/root/btc5m_params.json"   # 参数持久化文件
+PARAM_FILE   = "/root/btc5m_params.json"
 
 CTF_ABI  = [{"inputs":[{"name":"collateralToken","type":"address"},{"name":"parentCollectionId","type":"bytes32"},{"name":"conditionId","type":"bytes32"},{"name":"indexSets","type":"uint256[]"}],"name":"redeemPositions","outputs":[],"stateMutability":"nonpayable","type":"function"}]
 USDC_ABI = [{"inputs":[{"name":"account","type":"address"}],"name":"balanceOf","outputs":[{"name":"","type":"uint256"}],"stateMutability":"view","type":"function"}]
 SAFE_ABI = [
-    {"inputs": [], "name": "nonce", "outputs": [{"type": "uint256"}], "stateMutability": "view", "type": "function"},
+    {"inputs":[],"name":"nonce","outputs":[{"type":"uint256"}],"stateMutability":"view","type":"function"},
     {"inputs":[{"name":"to","type":"address"},{"name":"value","type":"uint256"},{"name":"data","type":"bytes"},{"name":"operation","type":"uint8"},{"name":"safeTxGas","type":"uint256"},{"name":"baseGas","type":"uint256"},{"name":"gasPrice","type":"uint256"},{"name":"gasToken","type":"address"},{"name":"refundReceiver","type":"address"},{"name":"_nonce","type":"uint256"}],"name":"getTransactionHash","outputs":[{"type":"bytes32"}],"stateMutability":"view","type":"function"},
-    {"inputs":[{"name":"to","type":"address"},{"name":"value","type":"uint256"},{"name":"data","type":"bytes"},{"name":"operation","type":"uint8"},{"name":"safeTxGas","type":"uint256"},{"name":"baseGas","type":"uint256"},{"name":"gasPrice","type":"uint256"},{"name":"gasToken","type":"address"},{"name":"refundReceiver","type":"address","name":"signatures","type":"bytes"}],"name":"execTransaction","outputs":[{"type":"bool"}],"stateMutability":"payable","type":"function"},
+    {"inputs":[{"name":"to","type":"address"},{"name":"value","type":"uint256"},{"name":"data","type":"bytes"},{"name":"operation","type":"uint8"},{"name":"safeTxGas","type":"uint256"},{"name":"baseGas","type":"uint256"},{"name":"gasPrice","type":"uint256"},{"name":"gasToken","type":"address"},{"name":"refundReceiver","type":"address"},{"name":"signatures","type":"bytes"}],"name":"execTransaction","outputs":[{"type":"bool"}],"stateMutability":"payable","type":"function"},
 ]
 
 mode      = "A"
@@ -62,23 +62,23 @@ _old_term = None
 
 
 # ─────────────────────────────────────────────
-#  参数持久化：启动时加载，修改后自动保存
+#  参数持久化
 # ─────────────────────────────────────────────
-
 def load_params():
     global BASE_BET, MARTIN_MULTIPLIER, ENTRY_MIN_PRICE, ENTRY_MIN_DIFF, WIN_PRICE
-    if os.path.exists(PARAM_FILE):
-        try:
-            with open(PARAM_FILE) as f:
-                p = json.load(f)
-            BASE_BET          = float(p.get("BASE_BET",          BASE_BET))
-            MARTIN_MULTIPLIER = float(p.get("MARTIN_MULTIPLIER", MARTIN_MULTIPLIER))
-            ENTRY_MIN_PRICE   = float(p.get("ENTRY_MIN_PRICE",   ENTRY_MIN_PRICE))
-            ENTRY_MIN_DIFF    = float(p.get("ENTRY_MIN_DIFF",    ENTRY_MIN_DIFF))
-            WIN_PRICE         = float(p.get("WIN_PRICE",         WIN_PRICE))
-            print(f"[参数] 已从 {PARAM_FILE} 加载参数")
-        except Exception as e:
-            print(f"[参数] 加载失败，使用默认值: {e}")
+    if not os.path.exists(PARAM_FILE):
+        return
+    try:
+        with open(PARAM_FILE) as f:
+            p = json.load(f)
+        BASE_BET          = float(p.get("BASE_BET",          BASE_BET))
+        MARTIN_MULTIPLIER = float(p.get("MARTIN_MULTIPLIER", MARTIN_MULTIPLIER))
+        ENTRY_MIN_PRICE   = float(p.get("ENTRY_MIN_PRICE",   ENTRY_MIN_PRICE))
+        ENTRY_MIN_DIFF    = float(p.get("ENTRY_MIN_DIFF",    ENTRY_MIN_DIFF))
+        WIN_PRICE         = float(p.get("WIN_PRICE",         WIN_PRICE))
+        print(f"[参数] 已从 {PARAM_FILE} 加载参数")
+    except Exception as e:
+        print(f"[参数] 加载失败，使用默认值: {e}")
 
 
 def save_params():
@@ -96,76 +96,78 @@ def save_params():
 
 
 def show_params():
-    print("
-" + "─" * 48)
+    sep = "-" * 48
+    print(sep)
     print("  当前参数")
-    print("─" * 48)
+    print(sep)
     print(f"  [1] 底注金额      BASE_BET          = {BASE_BET} U")
     print(f"  [2] 马丁倍数      MARTIN_MULTIPLIER = {MARTIN_MULTIPLIER}x")
     print(f"  [3] 入场最低价格  ENTRY_MIN_PRICE   = {ENTRY_MIN_PRICE}")
     print(f"  [4] 入场BTC价差   ENTRY_MIN_DIFF    = {ENTRY_MIN_DIFF} USD")
     print(f"  [5] 判赢价格线    WIN_PRICE         = {WIN_PRICE}")
-    print("─" * 48)
+    print(sep)
 
 
 # ─────────────────────────────────────────────
 #  调参菜单（按 P 键进入）
 # ─────────────────────────────────────────────
+
+PARAM_DEFS = {
+    "1": ("BASE_BET",          "底注金额 (>0)",             float, lambda v: v > 0),
+    "2": ("MARTIN_MULTIPLIER", "马丁倍数 (>=1)",            float, lambda v: v >= 1),
+    "3": ("ENTRY_MIN_PRICE",   "入场最低价格 (0.01~0.99)",  float, lambda v: 0.01 <= v <= 0.99),
+    "4": ("ENTRY_MIN_DIFF",    "入场BTC价差 USD (>=0)",     float, lambda v: v >= 0),
+    "5": ("WIN_PRICE",         "判赢价格线 (0.5~0.99)",     float, lambda v: 0.5 <= v <= 0.99),
+}
+
+
 def param_menu():
     global BASE_BET, MARTIN_MULTIPLIER, ENTRY_MIN_PRICE, ENTRY_MIN_DIFF, WIN_PRICE
 
-    restore_terminal()
-    print("
-" + "=" * 48)
+    restore_terminal()   # 切回正常输入模式
+
+    print("")
+    print("=" * 48)
     print("  ★ 参数调整菜单（策略不中断）")
     show_params()
     print("  输入序号修改，直接回车退出菜单")
     print("=" * 48)
 
-    PARAMS = {
-        "1": ("BASE_BET",          "底注金额 (>0)",              float, lambda v: v > 0),
-        "2": ("MARTIN_MULTIPLIER", "马丁倍数 (>=1)",             float, lambda v: v >= 1),
-        "3": ("ENTRY_MIN_PRICE",   "入场最低价格 (0.01~0.99)",   float, lambda v: 0.01 <= v <= 0.99),
-        "4": ("ENTRY_MIN_DIFF",    "入场BTC价差 USD (>=0)",      float, lambda v: v >= 0),
-        "5": ("WIN_PRICE",         "判赢价格线 (0.5~0.99)",      float, lambda v: 0.5 <= v <= 0.99),
-    }
-
     while True:
         try:
-            choice = input("
-请选择要修改的参数 [1-5，回车退出]: ").strip()
+            choice = input("\n请选择 [1-5，回车退出]: ").strip()
         except (EOFError, KeyboardInterrupt):
             break
 
         if choice == "":
             break
 
-        if choice not in PARAMS:
-            print("  无效选项，请输入 1~5 或直接回车退出")
+        if choice not in PARAM_DEFS:
+            print("  无效，请输入 1~5 或直接回车退出")
             continue
 
-        param_key, desc, cast, validate = PARAMS[choice]
+        param_key, desc, cast, validate = PARAM_DEFS[choice]
         current = globals()[param_key]
         try:
-            raw = input(f"  {desc}，当前值={current}，新值: ").strip()
+            raw = input(f"  {desc}  当前={current}  新值: ").strip()
             if raw == "":
                 print("  未修改")
                 continue
             new_val = cast(raw)
             if not validate(new_val):
-                print(f"  ❌ 值 {new_val} 不在合法范围内，未修改")
+                print(f"  ❌ {new_val} 不在合法范围，未修改")
                 continue
         except ValueError:
-            print("  ❌ 输入格式错误，未修改")
+            print("  ❌ 格式错误，未修改")
             continue
 
         globals()[param_key] = new_val
-        print(f"  ✅ {param_key} 已更新: {current} → {new_val}")
+        print(f"  ✅ {param_key}: {current} -> {new_val}")
         save_params()
         show_params()
 
-    print("[菜单] 已退出调参菜单，策略继续运行\n")
-    setup_terminal()
+    print("\n[菜单] 退出，策略继续运行")
+    setup_terminal()   # 切回 raw 模式
 
 
 # ─────────────────────────────────────────────
@@ -189,21 +191,21 @@ def setup_terminal():
     try:
         fd        = sys.stdin.fileno()
         _old_term = termios.tcgetattr(fd)
-        new       = termios.tcgetattr(fd)
-        new[3]   &= ~(termios.ICANON | termios.ECHO)
-        new[6][termios.VMIN]  = 0
-        new[6][termios.VTIME] = 0
-        termios.tcsetattr(fd, termios.TCSANOW, new)
-    except:
+        new_attr  = termios.tcgetattr(fd)
+        new_attr[3] &= ~(termios.ICANON | termios.ECHO)
+        new_attr[6][termios.VMIN]  = 0
+        new_attr[6][termios.VTIME] = 0
+        termios.tcsetattr(fd, termios.TCSANOW, new_attr)
+    except Exception:
         pass
 
 
 def restore_terminal():
     global _old_term
     try:
-        if _old_term:
+        if _old_term is not None:
             termios.tcsetattr(sys.stdin.fileno(), termios.TCSANOW, _old_term)
-    except:
+    except Exception:
         pass
 
 
@@ -211,24 +213,27 @@ def check_keypress():
     global mode
     try:
         r, _, _ = select.select([sys.stdin], [], [], 0)
-        if r:
-            ch = sys.stdin.read(1)
-            if ch in ('m', 'M'):
-                if mode == "A":
-                    mode, label = "B", "只做DOWN"
-                elif mode == "B":
-                    mode, label = "C", "UP+DOWN同时"
-                else:
-                    mode, label = "A", "只做UP"
-                print(f"\n[切换] 模式:{mode} ({label})")
-            elif ch in ('p', 'P'):
-                param_menu()
-            elif ch in ('q', 'Q', '\x03'):
-                print("\n[退出] 用户按q退出")
-                restore_terminal()
-                os._exit(0)
-    except:
-        pass
+        if not r:
+            return
+        ch = sys.stdin.read(1)
+        if not ch:
+            return
+        if ch in ('m', 'M'):
+            if mode == "A":
+                mode = "B"; label = "只做DOWN"
+            elif mode == "B":
+                mode = "C"; label = "UP+DOWN同时"
+            else:
+                mode = "A"; label = "只做UP"
+            print(f"\n[切换] 模式:{mode} ({label})")
+        elif ch in ('p', 'P'):
+            param_menu()
+        elif ch in ('q', 'Q', '\x03'):
+            print("\n[退出] 用户按q退出")
+            restore_terminal()
+            os._exit(0)
+    except Exception as e:
+        print(f"[keypress error] {e}")
 
 
 # ─────────────────────────────────────────────
@@ -239,7 +244,7 @@ def get_current_balance():
         w3   = Web3(Web3.HTTPProvider(POLYGON_RPC))
         usdc = w3.eth.contract(address=Web3.to_checksum_address(USDC_ADDRESS), abi=USDC_ABI)
         return usdc.functions.balanceOf(Web3.to_checksum_address(WALLET_ADDRESS)).call() / 1e6
-    except:
+    except Exception:
         return None
 
 
@@ -250,7 +255,7 @@ def get_market_price(token_id):
             p = float(r.json().get("mid", 0.5))
             return round(p, 3), round(1 - p, 3)
         return None, None
-    except:
+    except Exception:
         return None, None
 
 
@@ -258,7 +263,7 @@ def get_btc_price():
     try:
         r = requests.get("https://api.binance.com/api/v3/ticker/price?symbol=BTCUSDT", timeout=2)
         return float(r.json()["price"]) if r.status_code == 200 else 0.0
-    except:
+    except Exception:
         return 0.0
 
 
@@ -273,7 +278,7 @@ def cancel_all_open_orders():
     try:
         get_client().cancel_all()
         print("[OK] 已取消所有挂单")
-    except:
+    except Exception:
         pass
 
 
@@ -334,7 +339,7 @@ def redeem_thread(condition_id):
             tx_hash2  = w3.eth.send_raw_transaction(signed_tx.raw_transaction)
             receipt   = w3.eth.wait_for_transaction_receipt(tx_hash2, timeout=180)
             if receipt.status == 1:
-                print("[Redeem] ✅ 完成")
+                print("[Redeem] 完成")
                 return
             else:
                 raise Exception("上链失败")
@@ -355,26 +360,38 @@ def get_active_btc_market():
         for ts in [period, period + MARKET_PERIOD, period - MARKET_PERIOD]:
             slug = f"btc-updown-5m-{ts}"
             r    = requests.get(GAMMA_API + "/markets", params={"slug": slug}, timeout=5)
-            if r.status_code != 200: continue
+            if r.status_code != 200:
+                continue
             markets = r.json()
-            if not markets: continue
+            if not markets:
+                continue
             m = markets[0]
-            if m.get("closed", True): continue
+            if m.get("closed", True):
+                continue
             condition_id = m.get("conditionId", "")
-            if not condition_id: continue
+            if not condition_id:
+                continue
             r2 = requests.get(CLOB_API + f"/markets/{condition_id}", timeout=5)
-            if r2.status_code != 200: continue
+            if r2.status_code != 200:
+                continue
             tokens = r2.json().get("tokens", [])
             up_token = down_token = None
             for t in tokens:
                 o = t.get("outcome", "").lower()
-                if o in ("up", "yes"):    up_token   = t.get("token_id")
-                elif o in ("down", "no"): down_token = t.get("token_id")
+                if o in ("up", "yes"):
+                    up_token = t.get("token_id")
+                elif o in ("down", "no"):
+                    down_token = t.get("token_id")
             if up_token and down_token:
-                return {"market_id": condition_id, "up_token": up_token,
-                        "down_token": down_token, "end_ts": ts + MARKET_PERIOD, "start_ts": ts}
+                return {
+                    "market_id":  condition_id,
+                    "up_token":   up_token,
+                    "down_token": down_token,
+                    "end_ts":     ts + MARKET_PERIOD,
+                    "start_ts":   ts,
+                }
         return None
-    except:
+    except Exception:
         return None
 
 
@@ -388,16 +405,19 @@ def load_stats():
                 s = json.load(f)
             if "history"     not in s: s["history"]     = []
             if "skips"       not in s: s["skips"]       = 0
-            if "last_result" not in s: s["last_result"]  = {"direction": "", "result": "", "pnl": 0.0, "martin_level": 1, "next_bet": BASE_BET}
+            if "last_result" not in s: s["last_result"]  = {
+                "direction": "", "result": "", "pnl": 0.0,
+                "martin_level": 1, "next_bet": BASE_BET
+            }
             return s
-        except:
+        except Exception:
             pass
     return {
         "rounds": 0, "skips": 0, "total_pnl": 0.0,
         "up":   {"wins": 0, "losses": 0, "loss_streak": 0, "current_bet": BASE_BET},
         "down": {"wins": 0, "losses": 0, "loss_streak": 0, "current_bet": BASE_BET},
         "last_result": {"direction": "", "result": "", "pnl": 0.0, "martin_level": 1, "next_bet": BASE_BET},
-        "history": []
+        "history": [],
     }
 
 
@@ -418,7 +438,7 @@ def print_stats(stats):
     sep   = "=" * 55
     print(f"\n{sep}")
     print(f"  BTC 5M 策略 ({mode}) | {mode_label()}")
-    print(f"  总轮数:{stats['rounds']}  跳过:{stats.get('skips',0)}")
+    print(f"  总轮数:{stats['rounds']}  跳过:{stats.get('skips', 0)}")
     print(f"  胜/负: {tot_w}W {tot_l}L  胜率:{wr:.1f}%")
     print(f"  累计盈亏: ${stats['total_pnl']:.2f}")
     if lr.get("direction"):
@@ -426,13 +446,13 @@ def print_stats(stats):
         print(f"  上一局: {lr['result']} {pnl_str}  马丁级别:{lr['martin_level']}  下注:${lr['next_bet']:.2f}")
     if bal is not None:
         print(f"  余额: ${bal:.2f}")
-    print(f"─ 当前参数 ──────────────────────────────────────")
+    print(f"  {'─'*45}")
     print(f"  底注:{BASE_BET}U  倍数:{MARTIN_MULTIPLIER}x  入场价>{ENTRY_MIN_PRICE}  价差>{ENTRY_MIN_DIFF}USD  判赢>={WIN_PRICE}")
     print(f"  [M] 切换模式  [P] 调整参数  [Q] 退出")
     print(f"{sep}\n")
 
 
-# ─────────────────────────────────────────────
+# ��────────────────────────────────────────────
 #  核心：执行一局
 # ─────────────────────────────────────────────
 def run_one_cycle(market, stats):
@@ -512,8 +532,10 @@ def run_one_cycle(market, stats):
 
         if remaining <= 1:
             fu, fd = get_market_price(up_token)
-            if fu: last_up_p = fu
-            if fd: last_dn_p = fd
+            if fu:
+                last_up_p = fu
+            if fd:
+                last_dn_p = fd
             print(f"剩余{remaining:>4}秒 | UP:{last_up_p:.3f} DOWN:{last_dn_p:.3f} | 差价:{diff_str} | {status} ${spent:.2f} {win_tag} [{mode_label()}]")
             break
 
@@ -549,8 +571,8 @@ def run_one_cycle(market, stats):
             up_s["losses"]      += 1
             up_s["loss_streak"] += 1
             if up_s["loss_streak"] >= MAX_LOSS_STREAK:
-                up_s["current_bet"]  = BASE_BET
-                up_s["loss_streak"]  = 0
+                up_s["current_bet"] = BASE_BET
+                up_s["loss_streak"] = 0
                 next_bet = BASE_BET
                 print(f"[结算] LOSE UP  ${bet:.2f} | 连输{MAX_LOSS_STREAK}次重置 -> ${BASE_BET:.2f}")
             else:
@@ -576,8 +598,8 @@ def run_one_cycle(market, stats):
             down_s["losses"]      += 1
             down_s["loss_streak"] += 1
             if down_s["loss_streak"] >= MAX_LOSS_STREAK:
-                down_s["current_bet"]  = BASE_BET
-                down_s["loss_streak"]  = 0
+                down_s["current_bet"] = BASE_BET
+                down_s["loss_streak"] = 0
                 next_bet = BASE_BET
                 print(f"[结算] LOSE DOWN ${bet:.2f} | 连输{MAX_LOSS_STREAK}次重置 -> ${BASE_BET:.2f}")
             else:
@@ -610,7 +632,6 @@ def main():
     global mode
 
     load_params()
-
     stats = load_stats()
 
     atexit.register(restore_terminal)
@@ -619,7 +640,7 @@ def main():
     print("=" * 55)
     print("  BTC 5M 马丁格尔策略")
     print(f"  底注:{BASE_BET}U | 倍数:{MARTIN_MULTIPLIER}x | 连输{MAX_LOSS_STREAK}次重置")
-    print(f"  入场条件: 价格>{ENTRY_MIN_PRICE}  BTC价差>{ENTRY_MIN_DIFF}USD")
+    print(f"  入场条件: 价格>{{ENTRY_MIN_PRICE}}  BTC价差>{{ENTRY_MIN_DIFF}}USD")
     print(f"  判赢: 最后1秒价格>={WIN_PRICE}")
     print(f"  [M] 切换模式  [P] 调整参数  [Q] 退出")
     print("=" * 55)
