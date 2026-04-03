@@ -8,7 +8,7 @@ import sys
 import tty
 import termios
 import atexit
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timezone
 from web3 import Web3
 from dotenv import load_dotenv
 
@@ -28,11 +28,11 @@ if _missing:
     raise EnvironmentError(f"[ERROR] 环境变量未设置: {', '.join(_missing)}")
 
 # ── 策略参数 ──────────────────────────────────────────
-PRICE_LEVELS   = [0.01, 0.02, 0.03, 0.04, 0.05]
-BUY_SIZE       = 5
-MARKET_PERIOD  = 300
-CANCEL_DELAY   = 60
-COST_PER_MARKET = sum(PRICE_LEVELS) * BUY_SIZE * 2
+PRICE_LEVELS    = [0.01, 0.02, 0.03, 0.04, 0.05]
+BUY_SIZE        = 5
+MARKET_PERIOD   = 300
+CANCEL_DELAY    = 60
+COST_PER_MARKET = sum(PRICE_LEVELS) * BUY_SIZE * 2  # $1.5
 
 CLOB_API     = "https://clob.polymarket.com"
 GAMMA_API    = "https://gamma-api.polymarket.com"
@@ -191,12 +191,12 @@ def fetch_today_markets():
             print(f"  [WARN] 查询市场失败 ts={m['start_ts']}: {e}")
             time.sleep(0.2)
 
-    print(f"  [初始化] 查到{len(valid)}个有效市场")
+    print(f"  [初始化] 查到{len(valid)}个有效未结束市场")
     return sorted(valid, key=lambda x: x["start_ts"])
 
 
 def place_market_orders(m):
-    cid = m["condition_id"]
+    cid   = m["condition_id"]
     slots = {}
     print(f"  [挂单] 市场 {cid[:12]}... start={datetime.fromtimestamp(m['start_ts']).strftime('%H:%M')}")
     for lv in PRICE_LEVELS:
@@ -263,9 +263,7 @@ def main():
         print("[ERROR] 未找到任何市场，退出")
         return
 
-    now = int(time.time())
-
-    # 清理残留挂单（不属于今天任何有效市场的token）
+    # 清理残留挂单
     print("\n[初始化] 检查残留挂单...")
     valid_tokens = set()
     for m in today_markets:
@@ -289,10 +287,10 @@ def main():
     for i, m in enumerate(today_markets):
         balance = get_current_balance()
         if balance is None or balance < COST_PER_MARKET:
-            print(f"  [停止] 余额不足${ balance:.2f if balance else 0}，已挂{i}个市场")
+            print(f"  [停止] 余额不足${balance:.2f if balance else 0}，已挂{i}个市场")
             next_market_idx = i
             break
-        cid = m["condition_id"]
+        cid   = m["condition_id"]
         slots = place_market_orders(m)
         market_states[cid] = {
             "up_token":    m["up_token"],
@@ -323,11 +321,11 @@ def main():
                     if cid in market_states and not market_states[cid]["cancelled"]:
                         cancel_market_orders(cid, market_states[cid]["slots"])
                         market_states[cid]["cancelled"] = True
-                        # 取消后尝试滚动挂下一个市场
+                        # 取消后滚动挂下一个市场
                         balance = get_current_balance()
                         while (balance is not None and balance >= COST_PER_MARKET
                                and next_market_idx < len(today_markets)):
-                            nm = today_markets[next_market_idx]
+                            nm   = today_markets[next_market_idx]
                             ncid = nm["condition_id"]
                             if ncid not in market_states:
                                 print(f"\n[滚动] 余额${balance:.2f}，挂下一个市场 {ncid[:12]}...")
@@ -376,14 +374,15 @@ def main():
                             "ever_placed": True,
                             "cancelled":   False,
                         }
+                # 当前局挂过单但成交了 → 本局不补
 
             # 3. 状态打印
             active = [m for m in today_markets if m["start_ts"] <= now < m["end_ts"]]
             if active:
-                m   = active[0]
-                cid = m["condition_id"]
+                m         = active[0]
+                cid       = m["condition_id"]
                 remaining = int(m["end_ts"] - now)
-                print(f"[{{datetime.now().strftime('%H:%M:%S')}}] 当前市场:{{cid[:12]}}... 剩余{{remaining}}s | \
+                print(f"[{{datetime.now().strftime('%H:%M:%S')}}] 当前:{{cid[:12]}}... 剩余{{remaining}}s | \
                       已挂:{{len(market_states)}}个 | 待挂:{{max(0,len(today_markets)-next_market_idx)}}个 | \
                       取消队列:{{len(cancel_queue)}}个")
 
