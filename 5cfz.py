@@ -31,8 +31,6 @@ if _missing:
 PRICE_LEVELS    = [0.01, 0.02, 0.03, 0.04, 0.05]
 BUY_SIZE        = 5
 MARKET_PERIOD   = 300
-POLL_INTERVAL   = 60
-REPLENISH_DELAY = 60
 
 ENABLE_BTC_FILTER = False
 BTC_DIFF_MAX      = 25.0
@@ -46,6 +44,8 @@ LOG_FILE     = "/root/5cfz.json"
 
 USDC_ABI = [{"inputs":[{"name":"account","type":"address"}],"name":"balanceOf","outputs":[{"name":"","type":"uint256"}],"stateMutability":"view","type":"function"}]
 
+# 全局槽位：跨局持续维护，key=(direction, price), value=order_id or None
+global_slots = {}
 
 def getch():
     fd  = sys.stdin.fileno()
@@ -55,7 +55,6 @@ def getch():
         return sys.stdin.read(1)
     finally:
         termios.tcsetattr(fd, termios.TCSADRAIN, old)
-
 
 def keyboard_listener():
     print("[KEY] q=退出")
@@ -68,7 +67,6 @@ def keyboard_listener():
         except Exception:
             time.sleep(0.1)
 
-
 def get_current_balance():
     try:
         w3   = Web3(Web3.HTTPProvider(POLYGON_RPC))
@@ -76,7 +74,6 @@ def get_current_balance():
         return usdc.functions.balanceOf(Web3.to_checksum_address(WALLET_ADDRESS)).call() / 1e6
     except:
         return None
-
 
 def get_market_price(up_token):
     try:
@@ -88,15 +85,14 @@ def get_market_price(up_token):
     except:
         return None, None
 
-
 def get_client():
     from py_clob_client.client import ClobClient
     from py_clob_client.clob_types import ApiCreds
     creds = ApiCreds(api_key=API_KEY, api_secret=API_SECRET, api_passphrase=API_PASSPHRASE)
     return ClobClient(host=CLOB_API, chain_id=137, key=PRIVATE_KEY, creds=creds, signature_type=2, funder=WALLET_ADDRESS)
 
-
 def get_open_order_ids():
+    """获取当前所有活跃挂单的order_id集合"""
     try:
         client = get_client()
         orders = client.get_orders()
@@ -107,8 +103,7 @@ def get_open_order_ids():
         print(f"  [WARN] 获取挂单列表失败: {e}")
         return set()
 
-
-def place_order(token_id, size, price, label=""):
+def place_order(token_id, size, price, label=""): 
     from py_clob_client.clob_types import OrderArgs, OrderType
     from py_clob_client.order_builder.constants import BUY
     amount_usd = round(size * price, 4)
@@ -124,7 +119,6 @@ def place_order(token_id, size, price, label=""):
         print(f"  [ERROR] 挂单失败 {label}: {e}")
         return None
 
-
 def load_stats():
     if os.path.exists(LOG_FILE):
         try:
@@ -134,11 +128,9 @@ def load_stats():
             pass
     return {"rounds": 0, "history": []}
 
-
 def save_stats(stats):
     with open(LOG_FILE, "w") as f:
         json.dump(stats, f, indent=2, ensure_ascii=False)
-
 
 def get_active_btc_market():
     try:
@@ -181,76 +173,61 @@ def get_active_btc_market():
     except:
         return None
 
+def replenish_missing(token_map):
+    """检查全局slots，只补缺失的单"""
+    open_ids = get_open_order_ids()
+
+    missing = []
+    for key, oid in global_slots.items():
+        if oid is None or oid not in open_ids:
+            missing.append(key)
+
+    if not missing:
+        print(f"  [检查] 10个单全部在挂单中，无需补单")
+        return
+
+    print(f"  [补单] 发现{len(missing)}个缺失，开始补: {[(d, int(p*100)) for d,p in missing]}")
+    for (direction, lv) in missing:
+        oid = place_order(token_map[direction], BUY_SIZE, lv, f"补{direction}@{int(lv*100)}c")
+        global_slots[(direction, lv)] = oid
+        time.sleep(0.3)
 
 def run_one_cycle(market):
+    global global_slots
+
     up_token     = market["up_token"]
     down_token   = market["down_token"]
     end_ts       = market["end_ts"]
     condition_id = market["market_id"]
 
+    token_map = {"UP": up_token, "DOWN": down_token}
+
     print(f"\n{'='*55}")
     print(f"[新周期] {datetime.now().strftime('%H:%M:%S')} | 市场:{condition_id[:12]}...")
-    print(f"  挂单: 1c~5c x UP+DOWN 各{BUY_SIZE}股")
     print(f"{'='*55}")
 
     up_p, dn_p = get_market_price(up_token)
-    if up_p is None:
-        print("[ERROR] 无法获取市场价格，本局跳过")
-        return
+    if up_p is not None:
+        print(f"  当前 UP:{up_p:.3f} DOWN:{dn_p:.3f}")
 
-    print(f"  当前 UP:{up_p:.3f} DOWN:{dn_p:.3f}")
+    # 初始化slots（第一次运行）
+    if not global_slots:
+        print(f"  [首次] 初始化10个槽位并全部挂单")
+        for lv in PRICE_LEVELS:
+            for direction in ["UP", "DOWN"]:
+                global_slots[(direction, lv)] = None
 
-    token_map = {"UP": up_token, "DOWN": down_token}
+    # 每局开始检查并补缺失的单
+    replenish_missing(token_map)
 
-    slots = {}
-    for lv in PRICE_LEVELS:
-        slots[("UP",   lv)] = None
-        slots[("DOWN", lv)] = None
+    placed = sum(1 for v in global_slots.values() if v)
+    print(f"  [状态] 当前有效挂单: {placed}/10 | 等待周期结束...")
 
-    print(f"\n  [开局挂单]")
-    for lv in PRICE_LEVELS:
-        for direction in ["UP", "DOWN"]:
-            oid = place_order(token_map[direction], BUY_SIZE, lv, f"{direction}@{int(lv*100)}c")
-            slots[(direction, lv)] = oid
-            time.sleep(0.3)
+    # 等待本局结束
+    while time.time() < end_ts:
+        time.sleep(5)
 
-    placed = sum(1 for v in slots.values() if v)
-    print(f"\n  [挂单完成] {placed}/10 | 开始轮询补单(每{POLL_INTERVAL}s)...")
-
-    while True:
-        now       = time.time()
-        remaining = int(end_ts - now)
-
-        if now >= end_ts:
-            print(f"  [周期结束] {datetime.now().strftime('%H:%M:%S')}")
-            break
-
-        print(f"\n  [检查] 剩余{remaining}秒 | {datetime.now().strftime('%H:%M:%S')}")
-
-        open_ids = get_open_order_ids()
-
-        missing = []
-        for key, oid in slots.items():
-            if oid is None or oid not in open_ids:
-                missing.append(key)
-
-        if missing:
-            print(f"  [缺单] 发现{len(missing)}个缺失，{REPLENISH_DELAY}秒后补单: {[(d, int(p*100)) for d,p in missing]}")
-            time.sleep(REPLENISH_DELAY)
-
-            if time.time() >= end_ts:
-                print(f"  [跳过补单] 周期已结束")
-                break
-
-            for (direction, lv) in missing:
-                oid = place_order(token_map[direction], BUY_SIZE, lv, f"补{direction}@{int(lv*100)}c")
-                slots[(direction, lv)] = oid
-                time.sleep(0.3)
-        else:
-            print(f"  [OK] 10个单全部在挂单中")
-            wait = min(POLL_INTERVAL, max(1, remaining - 1))
-            time.sleep(wait)
-
+    print(f"  [周期结束] {datetime.now().strftime('%H:%M:%S')}")
 
 def main():
     atexit.register(lambda: os.system("stty sane"))
@@ -260,8 +237,7 @@ def main():
     print("  BTC 5M 多档位反转策略 (1c~5c)")
     print(f"  挂单价位: {[f'{int(p*100)}c' for p in PRICE_LEVELS]}")
     print(f"  每位各买: {BUY_SIZE}股 (UP+DOWN)")
-    print(f"  轮询间隔: {POLL_INTERVAL}s  补单延迟: {REPLENISH_DELAY}s")
-    print(f"  BTC差价过滤: {'开启' if ENABLE_BTC_FILTER else '关闭'}")
+    print(f"  补单时机: 新一局开始时检查并补缺失单")
     print(f"  [KEY] q=退出")
     print("=" * 55 + "\n")
 
@@ -303,7 +279,6 @@ def main():
         except Exception as e:
             print(f"[ERROR] 主循环异常: {e}")
             time.sleep(10)
-
 
 if __name__ == "__main__":
     main()
