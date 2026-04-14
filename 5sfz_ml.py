@@ -1222,7 +1222,9 @@ def run_one_cycle(market, stats):
                     sl_sell_attempted = True
                     resp = sell_order_by_size(token_id, entry_size, cur_mid, f"止损{entry_dir}")
                     if resp is not None:
-                        entry_size = 0.0
+                        total_spent = round(total_spent - entry_cost, 4)
+                        entry_cost  = 0.0
+                        entry_size  = 0.0
                         plog(f"[止损] 卖出成功，对冲继续运行")
                     else:
                         plog(f"[警告] 止损卖出失败，对冲继续运行")
