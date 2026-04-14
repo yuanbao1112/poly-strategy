@@ -272,51 +272,56 @@ def show_param_panel(fd, old_settings):
             "26": ("COPY_MIN_USD",       "float", (0.1, 9999)),
             "27": ("COPY_MAX_USD",       "float", (1.0, 99999)),
         }
+        page = 1
         while True:
             cur = get_cfg()
             mc  = MARKET_CONFIGS.get(cur["MARKET_TYPE"], {})
             print("\n" + "=" * 55)
-            print("  ⚙️   参数面板  （机器人后台运行中）")
+            print(f"  ⚙️   参数面板  第{page}页/共2页  （机器人后台运行中）")
             print("=" * 55)
-            print(f"  1.  MARKET_TYPE      = {cur['MARKET_TYPE']:>8}   ({mc.get('label','')})  可选: 5m/15m/1h/4h/1d")
-            print(f"  2.  BUY_MODE         = {cur['BUY_MODE']:>8}   (usd/size)")
-            print(f"  3.  BUY_USD          = {cur['BUY_USD']:>8.2f}   USDC")
-            print(f"  4.  BUY_SHARES       = {cur['BUY_SHARES']:>8.2f}   股")
-            print(f"  5.  ENTRY_LAST_SEC   = {cur['ENTRY_LAST_SEC']:>8.3f}   秒")
-            print(f"  6.  CANCEL_LAST_SEC  = {cur['CANCEL_LAST_SEC']:>8.3f}   秒")
-            print(f"  7.  BTC_GAP_MIN      = {cur['BTC_GAP_MIN']:>8.1f}   美元(0=不过滤)")
-            print(f"  8.  FAST_PRINT_MS    = {cur['FAST_PRINT_MS']:>8.0f}   ms")
-            print(f"  9.  MIN_BUY_PRICE    = {cur['MIN_BUY_PRICE']:>8.3f}")
-            print(f"  10. MAX_BUY_PRICE    = {cur['MAX_BUY_PRICE']:>8.3f}")
-            print(f"  11. HEDGE_TRIGGER    = {cur['HEDGE_TRIGGER']:>8.3f}")
-            print(f"  12. HEDGE_MULTI      = {cur['HEDGE_MULTI']:>8.1f}   倍")
-            print(f"  13. HEDGE_MAX        = {cur['HEDGE_MAX']:>8}   次(0=不对冲)")
-            print(f"  14. HEDGE_CD_SEC     = {cur['HEDGE_CD_SEC']:>8.2f}   秒")
-            print(f"  15. HEDGE_CONFIRM_MS = {cur['HEDGE_CONFIRM_MS']:>8.0f}   ms")
-            print(f"  ── 止盈止损 ──────────────────────────────")
-            print(f"  16. TP_PCT           = {cur['TP_PCT']:>8.1f}   % 止盈(0=不止盈)")
-            print(f"  17. SL_PCT           = {cur['SL_PCT']:>8.1f}   % 止损(0=不止损)")
-            print(f"  18. ORDER_MODE       = {cur['ORDER_MODE']:>8}   (fak=吃单/gtc=挂单)")
-            print(f"  19. MANUAL_HEDGE     = {str(cur['MANUAL_HEDGE']):>8}   手动买入后是否对冲")
-            print(f"  29. SL_HEDGE_ENABLED = {str(cur.get('SL_HEDGE_ENABLED', True)):>8}   止损时是否对冲买反向")
-            print(f"  30. SL_HEDGE_MULTI   = {cur.get('SL_HEDGE_MULTI', 1.0):>8.1f}   止损对冲倍数")
-            print(f"  28. ENTRY_MODE       = {cur.get('ENTRY_MODE','dominant'):>8}   dominant=占优/reversal=反转")
-            print(f"  ── 跟单模式 ──────────────────────────────────")
-            print(f"  20. COPY_ENABLED     = {str(cur.get('COPY_ENABLED',False)):>8}   开启跟单")
-            print(f"  21. COPY_ADDRESS     = {(cur.get('COPY_ADDRESS','') or '未设置')[:16]:>16}   跟单地址")
-            print(f"  22. COPY_MODE        = {cur.get('COPY_MODE','usd'):>8}   usd/size/pct")
-            print(f"  23. COPY_USD         = {cur.get('COPY_USD',10.0):>8.2f}   固定金额USDC")
-            print(f"  24. COPY_SHARES      = {cur.get('COPY_SHARES',5.0):>8.2f}   固定股数")
-            print(f"  25. COPY_PCT         = {cur.get('COPY_PCT',0.0):>8.1f}   跟单百分比%")
-            print(f"  26. COPY_MIN_USD     = {cur.get('COPY_MIN_USD',1.0):>8.2f}   最小跟单金额")
-            print(f"  27. COPY_MAX_USD     = {cur.get('COPY_MAX_USD',500.0):>8.2f}   最大跟单金额")
-            print("=" * 55)
-            tp_desc = f"盈利达到买入金额{cur['TP_PCT']:.0f}%时卖出" if cur['TP_PCT'] > 0 else "未启用"
-            sl_desc = f"亏损达到买入金额{cur['SL_PCT']:.0f}%时卖出" if cur['SL_PCT'] > 0 else "未启用"
-            print(f"  止盈: {tp_desc}")
-            print(f"  止损: {sl_desc}")
-            print("=" * 55)
-            print("  输入数字修改对应参数，q=退出 (1-19)")
+            if page == 1:
+                print(f"  1.  MARKET_TYPE      = {cur['MARKET_TYPE']:>8}   ({mc.get('label','')})  可选: 5m/15m/1h/4h/1d")
+                print(f"  2.  BUY_MODE         = {cur['BUY_MODE']:>8}   (usd/size)")
+                print(f"  3.  BUY_USD          = {cur['BUY_USD']:>8.2f}   USDC")
+                print(f"  4.  BUY_SHARES       = {cur['BUY_SHARES']:>8.2f}   股")
+                print(f"  5.  ENTRY_LAST_SEC   = {cur['ENTRY_LAST_SEC']:>8.3f}   秒")
+                print(f"  6.  CANCEL_LAST_SEC  = {cur['CANCEL_LAST_SEC']:>8.3f}   秒")
+                print(f"  7.  BTC_GAP_MIN      = {cur['BTC_GAP_MIN']:>8.1f}   美元(0=不过滤)")
+                print(f"  8.  FAST_PRINT_MS    = {cur['FAST_PRINT_MS']:>8.0f}   ms")
+                print(f"  9.  MIN_BUY_PRICE    = {cur['MIN_BUY_PRICE']:>8.3f}")
+                print(f"  10. MAX_BUY_PRICE    = {cur['MAX_BUY_PRICE']:>8.3f}")
+                print(f"  11. HEDGE_TRIGGER    = {cur['HEDGE_TRIGGER']:>8.3f}")
+                print(f"  12. HEDGE_MULTI      = {cur['HEDGE_MULTI']:>8.1f}   倍")
+                print(f"  13. HEDGE_MAX        = {cur['HEDGE_MAX']:>8}   次(0=不对冲)")
+                print(f"  14. HEDGE_CD_SEC     = {cur['HEDGE_CD_SEC']:>8.2f}   秒")
+                print(f"  15. HEDGE_CONFIRM_MS = {cur['HEDGE_CONFIRM_MS']:>8.0f}   ms")
+                print(f"  ── 止盈止损 ──────────────────────────────")
+                print(f"  16. TP_PCT           = {cur['TP_PCT']:>8.1f}   % 止盈(0=不止盈)")
+                print(f"  17. SL_PCT           = {cur['SL_PCT']:>8.1f}   % 止损(0=不止损)")
+                print(f"  18. ORDER_MODE       = {cur['ORDER_MODE']:>8}   (fak=吃单/gtc=挂单)")
+                print(f"  19. MANUAL_HEDGE     = {str(cur['MANUAL_HEDGE']):>8}   手动买入后是否对冲")
+                print(f"  29. SL_HEDGE_ENABLED = {str(cur.get('SL_HEDGE_ENABLED', True)):>8}   止损时是否对冲买反向")
+                print(f"  30. SL_HEDGE_MULTI   = {cur.get('SL_HEDGE_MULTI', 1.0):>8.1f}   止损对冲倍数")
+                print(f"  28. ENTRY_MODE       = {cur.get('ENTRY_MODE','dominant'):>8}   dominant=占优/reversal=反转")
+                print("=" * 55)
+                tp_desc = f"盈利达到买入金额{cur['TP_PCT']:.0f}%时卖出" if cur['TP_PCT'] > 0 else "未启用"
+                sl_desc = f"亏损达到买入金额{cur['SL_PCT']:.0f}%时卖出" if cur['SL_PCT'] > 0 else "未启用"
+                print(f"  止盈: {tp_desc}")
+                print(f"  止损: {sl_desc}")
+                print("=" * 55)
+                print("  输入数字修改参数，[N]=下一页，q=退出")
+            else:
+                print(f"  ── 跟单模式 ──────────────────────────────────")
+                print(f"  20. COPY_ENABLED     = {str(cur.get('COPY_ENABLED',False)):>8}   开启跟单")
+                print(f"  21. COPY_ADDRESS     = {(cur.get('COPY_ADDRESS','') or '未设置')[:16]:>16}   跟单地址")
+                print(f"  22. COPY_MODE        = {cur.get('COPY_MODE','usd'):>8}   usd/size/pct")
+                print(f"  23. COPY_USD         = {cur.get('COPY_USD',10.0):>8.2f}   固定金额USDC")
+                print(f"  24. COPY_SHARES      = {cur.get('COPY_SHARES',5.0):>8.2f}   固定股数")
+                print(f"  25. COPY_PCT         = {cur.get('COPY_PCT',0.0):>8.1f}   跟单百分比%")
+                print(f"  26. COPY_MIN_USD     = {cur.get('COPY_MIN_USD',1.0):>8.2f}   最小跟单金额")
+                print(f"  27. COPY_MAX_USD     = {cur.get('COPY_MAX_USD',500.0):>8.2f}   最大跟单金额")
+                print("=" * 55)
+                print("  输入数字修改参数，[N]=上一页，q=退出")
             print("-" * 55)
 
             try:
@@ -328,8 +333,12 @@ def show_param_panel(fd, old_settings):
                 print("  ↩️  已退出面板")
                 break
 
+            if choice == "n":
+                page = 2 if page == 1 else 1
+                continue
+
             if choice not in param_map:
-                print(f"  ⚠️  无效选项，请输入 1-19 或 q")
+                print(f"  ⚠️  无效选项，请输入参数编号或 n/q")
                 continue
 
             key, typ, constraint = param_map[choice]
