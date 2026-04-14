@@ -906,21 +906,26 @@ def taker_buy_once(token_id, shares):
     resp   = client.post_order(signed, otype)
     return resp
 
-def sell_order_by_size(token_id, size, price, label=""):
+def sell_order_by_size(token_id, size, price, label="", max_retry=5):
     from py_clob_client.clob_types import OrderArgs, OrderType
     from py_clob_client.order_builder.constants import SELL
-    try:
-        price    = min(max(round(price * 0.95, 3), 0.01), 0.99)
-        client   = get_client()
-        order    = OrderArgs(token_id=token_id, price=price, size=size, side=SELL)
-        signed   = client.create_order(order)
-        resp     = client.post_order(signed, OrderType.FAK)
-        order_id = resp.get("orderID", "N/A") if isinstance(resp, dict) else "N/A"
-        plog(f"[卖出] {label}: {size}股 @ {price:.3f} = ${round(size*price,2):.2f} | ID:{order_id}")
-        return resp
-    except Exception as e:
-        plog(f"[ERROR] 卖出失败: {e}")
-        return None
+    for attempt in range(max_retry):
+        try:
+            cur_price  = get_mid(token_id) or price
+            sell_price = min(max(round(cur_price * 0.95, 3), 0.01), 0.99)
+            client     = get_client()
+            order      = OrderArgs(token_id=token_id, price=sell_price, size=size, side=SELL)
+            signed     = client.create_order(order)
+            resp       = client.post_order(signed, OrderType.FAK)
+            order_id   = resp.get("orderID", "N/A") if isinstance(resp, dict) else "N/A"
+            plog(f"[卖出] {label}: {size}股 @ {sell_price:.3f} = ${round(size*sell_price,2):.2f} | ID:{order_id}")
+            return resp
+        except Exception as e:
+            plog(f"[ERROR] 卖出失败(第{attempt+1}/{max_retry}次): {e}")
+            if attempt < max_retry - 1:
+                time.sleep(0.3)
+    plog(f"[ERROR] 卖出彻底失败: {label}，已重试{max_retry}次")
+    return None
 
 def get_active_market(market_type):
     mc     = MARKET_CONFIGS[market_type]
@@ -1021,6 +1026,8 @@ def run_one_cycle(market, stats):
     sampled_final       = False
     cancelled_already   = False
     tp_sl_triggered     = False
+    sl_sell_attempted   = False
+    tp_sell_attempted   = False
     hedge_count         = 0
     last_hedge_dir      = None
     last_hedge_size     = 0.0
@@ -1122,9 +1129,12 @@ def run_one_cycle(market, stats):
                     up_mid_c, dn_mid_c = price_cache.get()
                     m_price = up_mid_c if m_dir == "UP" else dn_mid_c
                     if entry_dir == m_dir and entry_size > 0 and m_price:
-                        sell_order_by_size(m_token, entry_size, m_price, f"卖出{m_dir}")
-                        entry_size = 0.0; total_spent = 0.0; bought = False; entry_dir = None
-                        tp_sl_triggered = True
+                        resp = sell_order_by_size(m_token, entry_size, m_price, f"卖出{m_dir}")
+                        if resp is not None:
+                            entry_size = 0.0; total_spent = 0.0; bought = False; entry_dir = None
+                            tp_sl_triggered = True
+                        else:
+                            plog(f"[警告] 手动卖出失败，持仓状态保留，对冲继续")
                     else:
                         plog(f"[警告] 无{m_dir}持仓或价格失败")
                 elif action == "SELL_ALL":
@@ -1133,9 +1143,12 @@ def run_one_cycle(market, stats):
                         up_mid_c, dn_mid_c = price_cache.get()
                         m_price = up_mid_c if entry_dir == "UP" else dn_mid_c
                         if m_price:
-                            sell_order_by_size(m_token, entry_size, m_price, f"全部卖{entry_dir}")
-                            entry_size = 0.0; total_spent = 0.0; bought = False; entry_dir = None
-                            tp_sl_triggered = True
+                            resp = sell_order_by_size(m_token, entry_size, m_price, f"全部卖{entry_dir}")
+                            if resp is not None:
+                                entry_size = 0.0; total_spent = 0.0; bought = False; entry_dir = None
+                                tp_sl_triggered = True
+                            else:
+                                plog("[警告] 手动全部卖出失败，持仓状态保留，对冲继续")
                         else:
                             plog("[警告] 获取价格失败，卖出取消")
                     else:
@@ -1192,20 +1205,27 @@ def run_one_cycle(market, stats):
             if cur_mid:
                 cur_val = entry_size * cur_mid
                 pnl_pct = (cur_val - entry_cost) / entry_cost * 100
-                if tp_pct > 0 and pnl_pct >= tp_pct:
+                if tp_pct > 0 and pnl_pct >= tp_pct and not tp_sell_attempted:
                     token_id = up_token if entry_dir == "UP" else dn_token
                     plog(f"🎯 止盈触发! 盈利{pnl_pct:.1f}%>={tp_pct:.0f}% | 卖出{entry_dir} {entry_size}股")
-                    sell_order_by_size(token_id, entry_size, cur_mid, f"止盈{entry_dir}")
-                    tp_sl_triggered = True
-                    bought          = False
-                    entry_size      = 0.0
-                elif sl_pct > 0 and pnl_pct <= -sl_pct:
+                    tp_sell_attempted = True
+                    resp = sell_order_by_size(token_id, entry_size, cur_mid, f"止盈{entry_dir}")
+                    if resp is not None:
+                        tp_sl_triggered = True
+                        bought          = False
+                        entry_size      = 0.0
+                    else:
+                        plog(f"[警告] 止盈卖出失败，对冲继续运行")
+                elif sl_pct > 0 and pnl_pct <= -sl_pct and not sl_sell_attempted:
                     token_id = up_token if entry_dir == "UP" else dn_token
                     plog(f"🛡️ 止损触发! 亏损{abs(pnl_pct):.1f}%>={sl_pct:.0f}% | 卖出{entry_dir} {entry_size}股")
-                    sell_order_by_size(token_id, entry_size, cur_mid, f"止损{entry_dir}")
-                    tp_sl_triggered = True
-                    bought          = False
-                    entry_size      = 0.0
+                    sl_sell_attempted = True
+                    resp = sell_order_by_size(token_id, entry_size, cur_mid, f"止损{entry_dir}")
+                    if resp is not None:
+                        entry_size = 0.0
+                        plog(f"[止损] 卖出成功，对冲继续运行")
+                    else:
+                        plog(f"[警告] 止损卖出失败，对冲继续运行")
 
         # ── 首次买入 ──
         if (not bought) and (not tp_sl_triggered) and remaining <= entry_last_sec + 0.001:
