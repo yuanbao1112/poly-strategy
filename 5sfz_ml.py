@@ -47,7 +47,7 @@ MARKET_CONFIGS = {
 
 RUNTIME_CFG = {
     "MARKET_TYPE":      "5m",
-    "BUY_MODE":         "usd",
+    "BUY_MODE":         "size",
     "BUY_USD":          50.0,
     "BUY_SHARES":       5.0,
     "ENTRY_LAST_SEC":   2.5,
@@ -63,7 +63,7 @@ RUNTIME_CFG = {
     "HEDGE_CONFIRM_MS": 300.0,
     "TP_PCT":           0.0,
     "SL_PCT":           0.0,
-    "ORDER_MODE":       "fak",
+    "ORDER_MODE":       "gtc",
     "MANUAL_HEDGE":     False,
     "ENTRY_MODE":       "dominant",
     "COPY_ENABLED":     False,
