@@ -65,6 +65,7 @@ RUNTIME_CFG = {
     "SL_PCT":           0.0,
     "ORDER_MODE":       "gtc",
     "MANUAL_HEDGE":     False,
+    "SL_HEDGE_ENABLED": True,
     "ENTRY_MODE":       "dominant",
     "COPY_ENABLED":     False,
     "COPY_ADDRESS":     "",
@@ -92,7 +93,7 @@ def _apply_cfg(d):
                   "CANCEL_LAST_SEC", "BTC_GAP_MIN", "FAST_PRINT_MS",
                   "MIN_BUY_PRICE", "MAX_BUY_PRICE",
                   "HEDGE_TRIGGER", "HEDGE_MULTI", "HEDGE_MAX", "HEDGE_CD_SEC",
-                  "HEDGE_CONFIRM_MS", "TP_PCT", "SL_PCT", "ORDER_MODE", "MANUAL_HEDGE",
+                  "HEDGE_CONFIRM_MS", "TP_PCT", "SL_PCT", "ORDER_MODE", "MANUAL_HEDGE", "SL_HEDGE_ENABLED",
                   "ENTRY_MODE", "COPY_ENABLED", "COPY_ADDRESS", "COPY_MODE",
                   "COPY_USD", "COPY_SHARES", "COPY_PCT", "COPY_MIN_USD", "COPY_MAX_USD"):
             if k in d:
@@ -119,6 +120,9 @@ def load_runtime_cfg(verbose=False):
         if "MANUAL_HEDGE" in d:
             if isinstance(d["MANUAL_HEDGE"], str):
                 d["MANUAL_HEDGE"] = d["MANUAL_HEDGE"].lower() in ("true", "1", "yes")
+        if "SL_HEDGE_ENABLED" in d:
+            if isinstance(d["SL_HEDGE_ENABLED"], str):
+                d["SL_HEDGE_ENABLED"] = d["SL_HEDGE_ENABLED"].lower() in ("true", "1", "yes")
         if "ENTRY_MODE" in d:
             d["ENTRY_MODE"] = str(d["ENTRY_MODE"]).lower()
             if d["ENTRY_MODE"] not in ("dominant", "reversal"):
@@ -161,7 +165,7 @@ def load_runtime_cfg(verbose=False):
                  f"BUY_MODE={cur['BUY_MODE']} BUY_USD={cur['BUY_USD']} "
                  f"ENTRY={cur['ENTRY_LAST_SEC']}s CANCEL={cur['CANCEL_LAST_SEC']}s "
                  f"TP={cur['TP_PCT']:.1f}% SL={cur['SL_PCT']:.1f}% "
-                 f"HEDGE_MAX={cur['HEDGE_MAX']}")
+                 f"HEDGE_MAX={cur['HEDGE_MAX']} SL_HEDGE_ENABLED={cur.get('SL_HEDGE_ENABLED', True)}")
     except Exception as e:
         if verbose:
             plog(f"⚠️  读取配置失败: {e}")
@@ -255,6 +259,7 @@ def show_param_panel(fd, old_settings):
             "17": ("SL_PCT",           "float", (0, 100)),
             "18": ("ORDER_MODE",        "str",   ["fak", "gtc"]),
             "19": ("MANUAL_HEDGE",      "bool",  [True, False]),
+            "29": ("SL_HEDGE_ENABLED",   "bool",  [True, False]),
             "28": ("ENTRY_MODE",         "str",   ["dominant", "reversal"]),
             "20": ("COPY_ENABLED",       "bool",  [True, False]),
             "21": ("COPY_ADDRESS",       "str_free", None),
@@ -291,6 +296,7 @@ def show_param_panel(fd, old_settings):
             print(f"  17. SL_PCT           = {cur['SL_PCT']:>8.1f}   % 止损(0=不止损)")
             print(f"  18. ORDER_MODE       = {cur['ORDER_MODE']:>8}   (fak=吃单/gtc=挂单)")
             print(f"  19. MANUAL_HEDGE     = {str(cur['MANUAL_HEDGE']):>8}   手动买入后是否对冲")
+            print(f"  29. SL_HEDGE_ENABLED = {str(cur.get('SL_HEDGE_ENABLED', True)):>8}   止损时是否对冲买反向")
             print(f"  28. ENTRY_MODE       = {cur.get('ENTRY_MODE','dominant'):>8}   dominant=占优/reversal=反转")
             print(f"  ── 跟单模式 ──────────────────────────────────")
             print(f"  20. COPY_ENABLED     = {str(cur.get('COPY_ENABLED',False)):>8}   开启跟单")
@@ -1219,49 +1225,66 @@ def run_one_cycle(market, stats):
                         plog(f"[警告] 止盈卖出失败，对冲继续运行")
                 elif sl_pct > 0 and pnl_pct <= -sl_pct and not sl_triggered:
                     sl_triggered   = True
-                    sl_hedge_dir   = "UP" if entry_dir == "DN" else "DN"
-                    sl_hedge_token = up_token if sl_hedge_dir == "UP" else dn_token
-                    sl_hedge_mid   = up_mid_c if sl_hedge_dir == "UP" else dn_mid_c
-                    import math
-                    sl_hedge_shares = max(math.ceil(last_hedge_size * hedge_multi), 1)
-                    actual_sl_hedge_shares = max(math.ceil(last_hedge_size * hedge_multi * 1.1), 1)  # 多买10%
-                    plog(f"🛡️ 止损触发! 亏损{abs(pnl_pct):.1f}%>={sl_pct:.0f}% | "
-                         f"先对冲买入{sl_hedge_dir} {sl_hedge_shares}股")
-                    try:
-                        from py_clob_client.clob_types import OrderArgs, OrderType
-                        from py_clob_client.order_builder.constants import BUY
-                        _client    = get_client()
-                        _order     = OrderArgs(token_id=sl_hedge_token, price=0.99,
-                                               size=actual_sl_hedge_shares, side=BUY)
-                        _signed    = _client.create_order(_order)
-                        _resp      = _client.post_order(_signed, OrderType.GTC)
-                        _oid       = _resp.get("orderID", "") if isinstance(_resp, dict) else ""
-                        _cost      = round(sl_hedge_shares * sl_hedge_mid, 4)
-                        plog(f"[止损对冲✅] {sl_hedge_dir} {sl_hedge_shares}股 ≈${_cost:.2f} | ID:{_oid}")
-                        hedge_count    += 1
-                        total_spent     = round(total_spent + _cost, 4)
-                        if sl_hedge_dir == "UP":
-                            up_size = round(up_size + sl_hedge_shares, 2)
-                            up_cost = round(up_cost + _cost, 4)
-                        else:
-                            dn_size = round(dn_size + sl_hedge_shares, 2)
-                            dn_cost = round(dn_cost + _cost, 4)
-                        last_hedge_dir  = sl_hedge_dir
-                        last_hedge_size = sl_hedge_shares
-                        sl_hedge_done   = True
+                    sl_hedge_enabled = cfg.get("SL_HEDGE_ENABLED", True)
+                    if not sl_hedge_enabled:
+                        # 不对冲，直接卖出亏损方
                         token_id = up_token if entry_dir == "UP" else dn_token
-                        plog(f"[止损] 对冲成功，卖出亏损方 {entry_dir} {entry_size}股")
+                        plog(f"🛡️ 止损触发! 亏损{abs(pnl_pct):.1f}%>={sl_pct:.0f}% | SL_HEDGE_ENABLED=False，直接卖出{entry_dir}")
                         sell_resp = sell_order_by_size(token_id, entry_size, cur_mid, f"止损{entry_dir}")
                         if sell_resp is not None:
-                            total_spent = round(total_spent - entry_cost, 4)
-                            entry_cost  = 0.0
-                            entry_size  = 0.0
-                            plog(f"[止损] 卖出成功，对冲继续运行")
+                            tp_sl_triggered = True
+                            bought          = False
+                            entry_cost      = 0.0
+                            entry_size      = 0.0
+                            total_spent     = 0.0
+                            plog(f"[止损] 卖出成功")
                         else:
-                            plog(f"[警告] 止损卖出失败，对冲继续运行")
-                    except Exception as _e:
-                        plog(f"[止损对冲❌] 买入失败: {_e}，下次重试")
-                        sl_triggered = False
+                            plog(f"[警告] 止损卖出失败")
+                            sl_triggered = False  # 允许下次重试
+                    else:
+                        sl_hedge_dir   = "UP" if entry_dir == "DN" else "DN"
+                        sl_hedge_token = up_token if sl_hedge_dir == "UP" else dn_token
+                        sl_hedge_mid   = up_mid_c if sl_hedge_dir == "UP" else dn_mid_c
+                        import math
+                        sl_hedge_shares = max(math.ceil(last_hedge_size * hedge_multi), 1)
+                        actual_sl_hedge_shares = max(math.ceil(last_hedge_size * hedge_multi * 1.1), 1)  # 多买10%
+                        plog(f"🛡️ 止损触发! 亏损{abs(pnl_pct):.1f}%>={sl_pct:.0f}% | "
+                             f"先对冲买入{sl_hedge_dir} {sl_hedge_shares}股")
+                        try:
+                            from py_clob_client.clob_types import OrderArgs, OrderType
+                            from py_clob_client.order_builder.constants import BUY
+                            _client    = get_client()
+                            _order     = OrderArgs(token_id=sl_hedge_token, price=0.99,
+                                                   size=actual_sl_hedge_shares, side=BUY)
+                            _signed    = _client.create_order(_order)
+                            _resp      = _client.post_order(_signed, OrderType.GTC)
+                            _oid       = _resp.get("orderID", "") if isinstance(_resp, dict) else ""
+                            _cost      = round(sl_hedge_shares * sl_hedge_mid, 4)
+                            plog(f"[止损对冲✅] {sl_hedge_dir} {sl_hedge_shares}股 ≈${_cost:.2f} | ID:{_oid}")
+                            hedge_count    += 1
+                            total_spent     = round(total_spent + _cost, 4)
+                            if sl_hedge_dir == "UP":
+                                up_size = round(up_size + sl_hedge_shares, 2)
+                                up_cost = round(up_cost + _cost, 4)
+                            else:
+                                dn_size = round(dn_size + sl_hedge_shares, 2)
+                                dn_cost = round(dn_cost + _cost, 4)
+                            last_hedge_dir  = sl_hedge_dir
+                            last_hedge_size = sl_hedge_shares
+                            sl_hedge_done   = True
+                            token_id = up_token if entry_dir == "UP" else dn_token
+                            plog(f"[止损] 对冲成功，卖出亏损方 {entry_dir} {entry_size}股")
+                            sell_resp = sell_order_by_size(token_id, entry_size, cur_mid, f"止损{entry_dir}")
+                            if sell_resp is not None:
+                                total_spent = round(total_spent - entry_cost, 4)
+                                entry_cost  = 0.0
+                                entry_size  = 0.0
+                                plog(f"[止损] 卖出成功，对冲继续运行")
+                            else:
+                                plog(f"[警告] 止损卖出失败，对冲继续运行")
+                        except Exception as _e:
+                            plog(f"[止损对冲❌] 买入失败: {_e}，下次重试")
+                            sl_triggered = False
 
         # ── 首次买入 ──
         if (not bought) and (not tp_sl_triggered) and remaining <= entry_last_sec + 0.001:
