@@ -1224,6 +1224,7 @@ def run_one_cycle(market, stats):
                     sl_hedge_mid   = up_mid_c if sl_hedge_dir == "UP" else dn_mid_c
                     import math
                     sl_hedge_shares = max(math.ceil(last_hedge_size * hedge_multi), 1)
+                    actual_sl_hedge_shares = max(math.ceil(last_hedge_size * hedge_multi * 1.1), 1)  # 多买10%
                     plog(f"🛡️ 止损触发! 亏损{abs(pnl_pct):.1f}%>={sl_pct:.0f}% | "
                          f"先对冲买入{sl_hedge_dir} {sl_hedge_shares}股")
                     try:
@@ -1231,7 +1232,7 @@ def run_one_cycle(market, stats):
                         from py_clob_client.order_builder.constants import BUY
                         _client    = get_client()
                         _order     = OrderArgs(token_id=sl_hedge_token, price=0.99,
-                                               size=sl_hedge_shares, side=BUY)
+                                               size=actual_sl_hedge_shares, side=BUY)
                         _signed    = _client.create_order(_order)
                         _resp      = _client.post_order(_signed, OrderType.GTC)
                         _oid       = _resp.get("orderID", "") if isinstance(_resp, dict) else ""
@@ -1356,11 +1357,12 @@ def run_one_cycle(market, stats):
 
             shares   = calc_order_size(cfg)
             shares   = max(round(int(shares * 10) / 10, 1), 0.1)  # 精度保证
+            actual_buy_shares = max(round(int(shares * 1.1 * 10) / 10, 1), 0.1)  # 多买10%
             cost_est = round(shares * side_mid, 4)
             plog(f"🎯 {remaining*1000:.0f}ms | {side} UP:{up_mid_c:.3f} DN:{dn_mid_c:.3f} "
                  f"@0.99市价 {shares:.2f}股 ≈${cost_est:.2f}")
             try:
-                resp     = taker_buy_once(token_id, shares)
+                resp     = taker_buy_once(token_id, actual_buy_shares)
                 order_id = resp.get("orderID", "") if isinstance(resp, dict) else ""
                 plog(f"✅ 下单成功：{side} {shares:.2f}股 @0.99 FAK | orderID={order_id}")
                 bought           = True
@@ -1399,13 +1401,14 @@ def run_one_cycle(market, stats):
                         import math
                         raw_hs = last_hedge_size * hedge_multi
                         hedge_shares = max(math.ceil(raw_hs), 1)  # 向上取整到整数
+                        actual_hedge_shares = max(math.ceil(raw_hs * 1.1), 1)  # 多买10%
                         plog(f"🔄 对冲触发! 反向{reverse_dir} | 第{hedge_count+1}次 "
                              f"| {last_hedge_size:.2f}×{hedge_multi:.0f}={hedge_shares:.2f}股")
                         try:
                             from py_clob_client.clob_types import OrderArgs, OrderType
                             from py_clob_client.order_builder.constants import BUY
                             client  = get_client()
-                            order   = OrderArgs(token_id=reverse_token, price=0.99, size=hedge_shares, side=BUY)
+                            order   = OrderArgs(token_id=reverse_token, price=0.99, size=actual_hedge_shares, side=BUY)
                             signed  = client.create_order(order)
                             resp    = client.post_order(signed, OrderType.GTC)
                             oid     = resp.get("orderID", "") if isinstance(resp, dict) else ""
