@@ -912,7 +912,7 @@ def sell_order_by_size(token_id, size, price, label="", max_retry=5):
     for attempt in range(max_retry):
         try:
             cur_price  = get_mid(token_id) or price
-            sell_price = min(max(round(cur_price * 0.95, 3), 0.01), 0.99)
+            sell_price = 0.01  # FAK卖单实际以买一价成交，0.01确保一定能匹配
             client     = get_client()
             order      = OrderArgs(token_id=token_id, price=sell_price, size=size, side=SELL)
             signed     = client.create_order(order)
