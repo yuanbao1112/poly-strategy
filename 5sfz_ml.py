@@ -58,6 +58,7 @@ RUNTIME_CFG = {
     "MAX_BUY_PRICE":    0.99,
     "HEDGE_TRIGGER":    0.65,
     "HEDGE_MULTI":      3.0,
+    "SL_HEDGE_MULTI":   1.0,
     "HEDGE_MAX":        2,
     "HEDGE_CD_SEC":     0.1,
     "HEDGE_CONFIRM_MS": 300.0,
@@ -92,7 +93,7 @@ def _apply_cfg(d):
         for k in ("MARKET_TYPE", "BUY_MODE", "BUY_USD", "BUY_SHARES", "ENTRY_LAST_SEC",
                   "CANCEL_LAST_SEC", "BTC_GAP_MIN", "FAST_PRINT_MS",
                   "MIN_BUY_PRICE", "MAX_BUY_PRICE",
-                  "HEDGE_TRIGGER", "HEDGE_MULTI", "HEDGE_MAX", "HEDGE_CD_SEC",
+                  "HEDGE_TRIGGER", "HEDGE_MULTI", "SL_HEDGE_MULTI", "HEDGE_MAX", "HEDGE_CD_SEC",
                   "HEDGE_CONFIRM_MS", "TP_PCT", "SL_PCT", "ORDER_MODE", "MANUAL_HEDGE", "SL_HEDGE_ENABLED",
                   "ENTRY_MODE", "COPY_ENABLED", "COPY_ADDRESS", "COPY_MODE",
                   "COPY_USD", "COPY_SHARES", "COPY_PCT", "COPY_MIN_USD", "COPY_MAX_USD"):
@@ -144,7 +145,7 @@ def load_runtime_cfg(verbose=False):
                     d.pop(k, None)
         for k in ("BUY_USD", "BUY_SHARES", "ENTRY_LAST_SEC", "CANCEL_LAST_SEC",
                   "BTC_GAP_MIN", "FAST_PRINT_MS", "MIN_BUY_PRICE", "MAX_BUY_PRICE",
-                  "HEDGE_TRIGGER", "HEDGE_MULTI", "HEDGE_CD_SEC", "HEDGE_CONFIRM_MS",
+                  "HEDGE_TRIGGER", "HEDGE_MULTI", "SL_HEDGE_MULTI", "HEDGE_CD_SEC", "HEDGE_CONFIRM_MS",
                   "TP_PCT", "SL_PCT"):
             if k in d:
                 try:
@@ -260,6 +261,7 @@ def show_param_panel(fd, old_settings):
             "18": ("ORDER_MODE",        "str",   ["fak", "gtc"]),
             "19": ("MANUAL_HEDGE",      "bool",  [True, False]),
             "29": ("SL_HEDGE_ENABLED",   "bool",  [True, False]),
+            "30": ("SL_HEDGE_MULTI",      "float", (1.0, 100.0)),
             "28": ("ENTRY_MODE",         "str",   ["dominant", "reversal"]),
             "20": ("COPY_ENABLED",       "bool",  [True, False]),
             "21": ("COPY_ADDRESS",       "str_free", None),
@@ -297,6 +299,7 @@ def show_param_panel(fd, old_settings):
             print(f"  18. ORDER_MODE       = {cur['ORDER_MODE']:>8}   (fak=吃单/gtc=挂单)")
             print(f"  19. MANUAL_HEDGE     = {str(cur['MANUAL_HEDGE']):>8}   手动买入后是否对冲")
             print(f"  29. SL_HEDGE_ENABLED = {str(cur.get('SL_HEDGE_ENABLED', True)):>8}   止损时是否对冲买反向")
+            print(f"  30. SL_HEDGE_MULTI   = {cur.get('SL_HEDGE_MULTI', 1.0):>8.1f}   止损对冲倍数")
             print(f"  28. ENTRY_MODE       = {cur.get('ENTRY_MODE','dominant'):>8}   dominant=占优/reversal=反转")
             print(f"  ── 跟单模式 ──────────────────────────────────")
             print(f"  20. COPY_ENABLED     = {str(cur.get('COPY_ENABLED',False)):>8}   开启跟单")
@@ -1246,8 +1249,9 @@ def run_one_cycle(market, stats):
                         sl_hedge_token = up_token if sl_hedge_dir == "UP" else dn_token
                         sl_hedge_mid   = up_mid_c if sl_hedge_dir == "UP" else dn_mid_c
                         import math
-                        sl_hedge_shares = max(math.ceil(last_hedge_size * hedge_multi), 1)
-                        actual_sl_hedge_shares = max(math.ceil(last_hedge_size * hedge_multi * 1.1), 1)  # 多买10%
+                        sl_hedge_multi = cfg.get("SL_HEDGE_MULTI", 1.0)
+                        sl_hedge_shares = max(math.ceil(last_hedge_size * sl_hedge_multi), 1)
+                        actual_sl_hedge_shares = max(math.ceil(last_hedge_size * sl_hedge_multi * 1.1), 1)  # 多买10%
                         plog(f"🛡️ 止损触发! 亏损{abs(pnl_pct):.1f}%>={sl_pct:.0f}% | "
                              f"先对冲买入{sl_hedge_dir} {sl_hedge_shares}股")
                         try:
