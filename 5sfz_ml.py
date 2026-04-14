@@ -899,7 +899,7 @@ def taker_buy_once(token_id, shares):
     shares = max(math.ceil(shares), 1)  # 向上取整到整数
     shares = float(shares)
     cfg    = get_cfg()
-    otype  = OrderType.FAK if cfg.get("ORDER_MODE", "fak") == "fak" else OrderType.GTC
+    otype  = OrderType.GTC
     client = get_client()
     order  = OrderArgs(token_id=token_id, price=0.99, size=shares, side=BUY)
     signed = client.create_order(order)
@@ -916,7 +916,7 @@ def sell_order_by_size(token_id, size, price, label="", max_retry=5):
             client     = get_client()
             order      = OrderArgs(token_id=token_id, price=sell_price, size=size, side=SELL)
             signed     = client.create_order(order)
-            resp       = client.post_order(signed, OrderType.FAK)
+            resp       = client.post_order(signed, OrderType.GTC)
             order_id   = resp.get("orderID", "N/A") if isinstance(resp, dict) else "N/A"
             plog(f"[卖出] {label}: {size}股 @ {sell_price:.3f} = ${round(size*sell_price,2):.2f} | ID:{order_id}")
             return resp
@@ -1233,7 +1233,7 @@ def run_one_cycle(market, stats):
                         _order     = OrderArgs(token_id=sl_hedge_token, price=0.99,
                                                size=sl_hedge_shares, side=BUY)
                         _signed    = _client.create_order(_order)
-                        _resp      = _client.post_order(_signed, OrderType.FAK)
+                        _resp      = _client.post_order(_signed, OrderType.GTC)
                         _oid       = _resp.get("orderID", "") if isinstance(_resp, dict) else ""
                         _cost      = round(sl_hedge_shares * sl_hedge_mid, 4)
                         plog(f"[止损对冲✅] {sl_hedge_dir} {sl_hedge_shares}股 ≈${_cost:.2f} | ID:{_oid}")
@@ -1407,9 +1407,7 @@ def run_one_cycle(market, stats):
                             client  = get_client()
                             order   = OrderArgs(token_id=reverse_token, price=0.99, size=hedge_shares, side=BUY)
                             signed  = client.create_order(order)
-                            _om2    = get_cfg().get("ORDER_MODE", "fak")
-                            _ot2    = OrderType.FAK if _om2 == "fak" else OrderType.GTC
-                            resp    = client.post_order(signed, _ot2)
+                            resp    = client.post_order(signed, OrderType.GTC)
                             oid     = resp.get("orderID", "") if isinstance(resp, dict) else ""
                             cost    = round(hedge_shares * reverse_mid, 4)
                             plog(f"[对冲✅] {reverse_dir} {hedge_shares:.2f}股 ≈${cost:.2f} | ID:{oid}")
