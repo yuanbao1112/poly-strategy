@@ -1026,7 +1026,8 @@ def run_one_cycle(market, stats):
     sampled_final       = False
     cancelled_already   = False
     tp_sl_triggered     = False
-    sl_sell_attempted   = False
+    sl_triggered        = False
+    sl_hedge_done       = False
     tp_sell_attempted   = False
     hedge_count         = 0
     last_hedge_dir      = None
@@ -1216,18 +1217,50 @@ def run_one_cycle(market, stats):
                         entry_size      = 0.0
                     else:
                         plog(f"[警告] 止盈卖出失败，对冲继续运行")
-                elif sl_pct > 0 and pnl_pct <= -sl_pct and not sl_sell_attempted:
-                    token_id = up_token if entry_dir == "UP" else dn_token
-                    plog(f"🛡️ 止损触发! 亏损{abs(pnl_pct):.1f}%>={sl_pct:.0f}% | 卖出{entry_dir} {entry_size}股")
-                    sl_sell_attempted = True
-                    resp = sell_order_by_size(token_id, entry_size, cur_mid, f"止损{entry_dir}")
-                    if resp is not None:
-                        total_spent = round(total_spent - entry_cost, 4)
-                        entry_cost  = 0.0
-                        entry_size  = 0.0
-                        plog(f"[止损] 卖出成功，对冲继续运行")
-                    else:
-                        plog(f"[警告] 止损卖出失败，对冲继续运行")
+                elif sl_pct > 0 and pnl_pct <= -sl_pct and not sl_triggered:
+                    sl_triggered   = True
+                    sl_hedge_dir   = "UP" if entry_dir == "DN" else "DN"
+                    sl_hedge_token = up_token if sl_hedge_dir == "UP" else dn_token
+                    sl_hedge_mid   = up_mid_c if sl_hedge_dir == "UP" else dn_mid_c
+                    import math
+                    sl_hedge_shares = max(math.ceil(last_hedge_size * hedge_multi), 1)
+                    plog(f"🛡️ 止损触发! 亏损{abs(pnl_pct):.1f}%>={sl_pct:.0f}% | "
+                         f"先对冲买入{sl_hedge_dir} {sl_hedge_shares}股")
+                    try:
+                        from py_clob_client.clob_types import OrderArgs, OrderType
+                        from py_clob_client.order_builder.constants import BUY
+                        _client    = get_client()
+                        _order     = OrderArgs(token_id=sl_hedge_token, price=0.99,
+                                               size=sl_hedge_shares, side=BUY)
+                        _signed    = _client.create_order(_order)
+                        _resp      = _client.post_order(_signed, OrderType.FAK)
+                        _oid       = _resp.get("orderID", "") if isinstance(_resp, dict) else ""
+                        _cost      = round(sl_hedge_shares * sl_hedge_mid, 4)
+                        plog(f"[止损对冲✅] {sl_hedge_dir} {sl_hedge_shares}股 ≈${_cost:.2f} | ID:{_oid}")
+                        hedge_count    += 1
+                        total_spent     = round(total_spent + _cost, 4)
+                        if sl_hedge_dir == "UP":
+                            up_size = round(up_size + sl_hedge_shares, 2)
+                            up_cost = round(up_cost + _cost, 4)
+                        else:
+                            dn_size = round(dn_size + sl_hedge_shares, 2)
+                            dn_cost = round(dn_cost + _cost, 4)
+                        last_hedge_dir  = sl_hedge_dir
+                        last_hedge_size = sl_hedge_shares
+                        sl_hedge_done   = True
+                        token_id = up_token if entry_dir == "UP" else dn_token
+                        plog(f"[止损] 对冲成功，卖出亏损方 {entry_dir} {entry_size}股")
+                        sell_resp = sell_order_by_size(token_id, entry_size, cur_mid, f"止损{entry_dir}")
+                        if sell_resp is not None:
+                            total_spent = round(total_spent - entry_cost, 4)
+                            entry_cost  = 0.0
+                            entry_size  = 0.0
+                            plog(f"[止损] 卖出成功，对冲继续运行")
+                        else:
+                            plog(f"[警告] 止损卖出失败，对冲继续运行")
+                    except Exception as _e:
+                        plog(f"[止损对冲❌] 买入失败: {_e}，下次重试")
+                        sl_triggered = False
 
         # ── 首次买入 ──
         if (not bought) and (not tp_sl_triggered) and remaining <= entry_last_sec + 0.001:
